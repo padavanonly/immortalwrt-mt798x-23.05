@@ -1691,7 +1691,7 @@ define Device/netcore_n60-pro
   BLOCKSIZE := 128k
   PAGESIZE := 2048
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
-  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7986-firmware mt7986-wo-firmware kmod-usb3 automount
+  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7986-firmware mt7986-wo-firmware kmod-usb3 automount kmod-usb-ledtrig-usbport
 endef
 TARGET_DEVICES += netcore_n60-pro
 

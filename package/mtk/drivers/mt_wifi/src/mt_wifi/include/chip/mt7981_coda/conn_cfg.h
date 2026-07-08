@@ -849,7 +849,7 @@ extern "C" {
     SWCTL_SRCCLKENA[0]           - (RW) Manual control conn_srcclkena (request osc clock source)
                                      1'h0: HW control mode
                                      1'h1: manual mode, value is set by SW_SRCCLKENA
-    SWCTL_EN_BG[1]               - (RW) Manual control da_wbg_en_bg (connsys bandgap enable siganl)
+    SWCTL_EN_BG[1]               - (RW) Manual control da_wbg_en_bg (connsys bandgap enable signal)
                                      1'h0: HW control mode
                                      1'h1: manual mode, value is set by SW_EN_BG
     SWCTL_EN_XBUF[2]             - (RW) Manual control da_wbg_en_xbuf (connsys xtal buffer enable signal)
@@ -1100,7 +1100,7 @@ extern "C" {
     SWCTL_SRCCLKENA[0]           - (RW) Manual control conn_srcclkena (request osc clock source)
                                      1'h0: HW control mode
                                      1'h1: manual mode, value is set by SW_SRCCLKENA
-    SWCTL_EN_BG[1]               - (RW) Manual control da_wbg_en_bg (connsys bandgap enable siganl)
+    SWCTL_EN_BG[1]               - (RW) Manual control da_wbg_en_bg (connsys bandgap enable signal)
                                      1'h0: HW control mode
                                      1'h1: manual mode, value is set by SW_EN_BG
     SWCTL_EN_XBUF[2]             - (RW) Manual control da_wbg_en_xbuf (connsys xtal buffer enable signal)

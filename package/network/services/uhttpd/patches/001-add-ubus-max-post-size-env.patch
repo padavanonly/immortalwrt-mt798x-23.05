@@ -1,0 +1,35 @@
+--- a/ubus.c
++++ b/ubus.c
+@@ -45,6 +45,8 @@ enum {
+ 	__RPC_MAX,
+ };
+ 
++static int g_ubus_max_post_size = (UH_UBUS_MAX_POST_SIZE);
++
+ static const struct blobmsg_policy rpc_policy[__RPC_MAX] = {
+ 	[RPC_JSONRPC] = { .name = "jsonrpc", .type = BLOBMSG_TYPE_STRING },
+ 	[RPC_METHOD] = { .name = "method", .type = BLOBMSG_TYPE_STRING },
+@@ -924,7 +926,7 @@ static int uh_ubus_data_send(struct clie
+ 		goto error;
+ 
+ 	du->post_len += len;
+-	if (du->post_len > UH_UBUS_MAX_POST_SIZE)
++	if (du->post_len > g_ubus_max_post_size)
+ 		goto error;
+ 
+ 	du->jsobj = json_tokener_parse_ex(du->jstok, data, len);
+@@ -987,6 +989,14 @@ uh_ubus_check_url(const char *url)
+ static int
+ uh_ubus_init(void)
+ {
++	const char *max_post_size_via_env = getenv("UH_UBUS_MAX_POST_SIZE");
++	if (max_post_size_via_env) {
++		g_ubus_max_post_size = atoi(max_post_size_via_env);
++		if (g_ubus_max_post_size <= 0 || g_ubus_max_post_size > (UH_UBUS_MAX_POST_SIZE) * 16) {
++			g_ubus_max_post_size = (UH_UBUS_MAX_POST_SIZE);
++		}
++	}
++
+ 	static struct dispatch_handler ubus_dispatch = {
+ 		.check_url = uh_ubus_check_url,
+ 		.handle_request = uh_ubus_handle_request,

@@ -1,0 +1,37 @@
+--- a/mt_wifi/embedded/common/cmm_info.c
++++ b/mt_wifi/embedded/common/cmm_info.c
+@@ -6567,6 +6567,22 @@
+ 		MTWF_DBG(NULL, DBG_CAT_AP, DBG_SUBCAT_ALL, DBG_LVL_ERROR, "Snprintf failed!\n");
+ 		return;
+ 	}
++	{
++		UINT8 vht_cw = 0, ccfs0 = 0, ccfs1 = 0;
++#ifdef DOT11_VHT_AC
++		if (HAS_VHT_OP_EXIST(pBss->ie_exists)) {
++			vht_cw = pBss->vht_op_ie.vht_op_info.ch_width;
++			ccfs0  = pBss->vht_op_ie.vht_op_info.ccfs_0;
++			ccfs1  = pBss->vht_op_ie.vht_op_info.ccfs_1;
++		}
++#endif /* DOT11_VHT_AC */
++		LeftBufSize = MsgLen - strlen(msg);
++		ret = snprintf(msg + strlen(msg), LeftBufSize, " %-6d%-6d%-6d", vht_cw, ccfs0, ccfs1);
++		if (os_snprintf_error(LeftBufSize, ret)) {
++			MTWF_DBG(NULL, DBG_CAT_AP, DBG_SUBCAT_ALL, DBG_LVL_ERROR, "Snprintf failed!\n");
++			return;
++		}
++	}
+ #ifdef CUSTOMER_VENDOR_IE_SUPPORT
+ #ifdef CUSTOMER_MAXBITRATE_SUPPORT
+ 	sprintf(msg + strlen(msg), " %-8lld", pBss->CustomerBssEntry.max_bit_rate);
+@@ -6736,8 +6752,9 @@
+ #else
+ 	LeftBufSize = TotalLen - strlen(msg);
+ 
+-	Status = snprintf(msg + strlen(msg), LeftBufSize, "%-4s%-4s%-33s%-20s%-23s%-8s%-9s%-11s%-7s%-3s%-8s\n",
+-				"No", "Ch", "SSID", "BSSID", "Security", "Rssi", "Signal(%)", "W-Mode", " ExtCH", " NT", " SSID_Len");
++	Status = snprintf(msg + strlen(msg), LeftBufSize, "%-4s%-4s%-33s%-20s%-23s%-8s%-9s%-11s%-7s%-3s%-8s %-6s%-6s%-6s\n",
++				"No", "Ch", "SSID", "BSSID", "Security", "Rssi", "Signal(%)", "W-Mode", " ExtCH", " NT", " SSID_Len",
++				"VHT_CW", "CCFS0", "CCFS1");
+ 
+ 	if (os_snprintf_error(LeftBufSize, Status)) {
+ 		MTWF_DBG(pAdapter, DBG_CAT_CFG, DBG_SUBCAT_ALL, DBG_LVL_ERROR, "Snprintf failed!\n");

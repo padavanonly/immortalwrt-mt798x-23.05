@@ -6721,7 +6721,7 @@ VOID RTMPIoctlGetSiteSurvey(
 #ifdef CUSTOMER_MAXBITRATE_SUPPORT
 	LeftBufSize = TotalLen - strlen(msg);
 	Status = snprintf(msg + strlen(msg), LeftBufSize, "%-4s%-4s%-33s%-20s%-23s%-9s%-11s%-7s%-3s%-8s%-16s\n",
-				"No", "Ch", "SSID", "BSSID", "Security", "Siganl(%)", "W-Mode", " ExtCH", " NT", " SSID_Len",
+				"No", "Ch", "SSID", "BSSID", "Security", "Signal(%)", "W-Mode", " ExtCH", " NT", " SSID_Len",
 				"MaxBitRate");
 	if (os_snprintf_error(LeftBufSize, Status)) {
 		MTWF_DBG(pAdapter, DBG_CAT_CFG, DBG_SUBCAT_ALL, DBG_LVL_ERROR, "Snprintf failed!\n");
@@ -6731,10 +6731,10 @@ VOID RTMPIoctlGetSiteSurvey(
 	LeftBufSize = TotalLen - strlen(msg);
 #ifdef CCAPI_API_SUPPORT
 	Status = snprintf(msg + strlen(msg), LeftBufSize, "%-4s%-4s%-33s%-20s%-23s%-8s%-9s%-11s%-7s%-3s%-8s\n",
-				"No", "Ch", "SSID", "BSSID", "Security", "Rssi", "Siganl(%)", "W-Mode", " ExtCH", " NT", " SSID_Len");
+				"No", "Ch", "SSID", "BSSID", "Security", "Rssi", "Signal(%)", "W-Mode", " ExtCH", " NT", " SSID_Len");
 #else
 	Status = snprintf(msg + strlen(msg), LeftBufSize, "%-4s%-4s%-33s%-20s%-23s%-9s%-11s%-7s%-3s%-8s\n",
-				"No", "Ch", "SSID", "BSSID", "Security", "Siganl(%)", "W-Mode", " ExtCH", " NT", " SSID_Len");
+				"No", "Ch", "SSID", "BSSID", "Security", "Signal(%)", "W-Mode", " ExtCH", " NT", " SSID_Len");
 #endif
 	if (os_snprintf_error(LeftBufSize, Status)) {
 		MTWF_DBG(pAdapter, DBG_CAT_CFG, DBG_SUBCAT_ALL, DBG_LVL_ERROR, "Snprintf failed!\n");

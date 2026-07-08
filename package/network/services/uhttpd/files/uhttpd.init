@@ -121,6 +121,7 @@ start_instance()
 	procd_set_param respawn
 	procd_set_param stderr 1
 	procd_set_param command "$UHTTPD_BIN" -f
+	procd_set_param env UH_UBUS_MAX_POST_SIZE=$((256 * 1024)) #256KB
 
 	config_get config "$cfg" config
 	if [ -z "$config" ]; then

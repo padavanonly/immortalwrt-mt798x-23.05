@@ -1,0 +1,47 @@
+--- a/mt_wifi/embedded/include/oid.h
++++ b/mt_wifi/embedded/include/oid.h
+@@ -2557,6 +2557,8 @@
+ #define OID_GET_SECURITY_TYPE									0x09BB
+ #define OID_GET_DFS_STATE         								0x09BC
+ #endif
++#define OID_GET_CEN_CH1						0x09C0
++#define OID_GET_CEN_CH2						0x09C1
+ 
+ #ifdef CONFIG_6G_AFC_SUPPORT
+ #define AFC_INQ_EVENT							0x09BB
+--- a/mt_wifi/embedded/ap/ap_cfg.c
++++ b/mt_wifi/embedded/ap/ap_cfg.c
+@@ -12348,6 +12348,33 @@
+ 		break;
+ 	}
+ 
++	case OID_GET_CEN_CH1:
++	{
++		UCHAR cen_ch;
++
++		if (wdev) {
++			cen_ch = wlan_operate_get_cen_ch_1(wdev);
++			wrq->u.data.length = sizeof(cen_ch);
++			Status = copy_to_user(wrq->u.data.pointer, &cen_ch, wrq->u.data.length);
++			MTWF_DBG(pAd, DBG_CAT_CFG, DBG_SUBCAT_ALL, DBG_LVL_INFO,
++				"OID_GET_CEN_CH1, intf %s cen_ch1=%d\n", wdev->if_dev->name, cen_ch);
++		}
++		break;
++	}
++	case OID_GET_CEN_CH2:
++	{
++		UCHAR cen_ch;
++
++		if (wdev) {
++			cen_ch = wlan_operate_get_cen_ch_2(wdev);
++			wrq->u.data.length = sizeof(cen_ch);
++			Status = copy_to_user(wrq->u.data.pointer, &cen_ch, wrq->u.data.length);
++			MTWF_DBG(pAd, DBG_CAT_CFG, DBG_SUBCAT_ALL, DBG_LVL_INFO,
++				"OID_GET_CEN_CH2, intf %s cen_ch2=%d\n", wdev->if_dev->name, cen_ch);
++		}
++		break;
++	}
++
+ #if defined(CONFIG_6G_SUPPORT) && defined(BSSMGR_CROSS_MODULE_SUPPORT)
+ 	case OID_BSS_MGMT_GET_EVENT:
+ 	{

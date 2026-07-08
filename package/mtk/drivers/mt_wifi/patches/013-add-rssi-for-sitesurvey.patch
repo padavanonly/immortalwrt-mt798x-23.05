@@ -33,10 +33,10 @@
 -#ifdef CCAPI_API_SUPPORT
 +
  	Status = snprintf(msg + strlen(msg), LeftBufSize, "%-4s%-4s%-33s%-20s%-23s%-8s%-9s%-11s%-7s%-3s%-8s\n",
- 				"No", "Ch", "SSID", "BSSID", "Security", "Rssi", "Siganl(%)", "W-Mode", " ExtCH", " NT", " SSID_Len");
+ 				"No", "Ch", "SSID", "BSSID", "Security", "Rssi", "Signal(%)", "W-Mode", " ExtCH", " NT", " SSID_Len");
 -#else
 -	Status = snprintf(msg + strlen(msg), LeftBufSize, "%-4s%-4s%-33s%-20s%-23s%-9s%-11s%-7s%-3s%-8s\n",
--				"No", "Ch", "SSID", "BSSID", "Security", "Siganl(%)", "W-Mode", " ExtCH", " NT", " SSID_Len");
+-				"No", "Ch", "SSID", "BSSID", "Security", "Signal(%)", "W-Mode", " ExtCH", " NT", " SSID_Len");
 -#endif
 +
  	if (os_snprintf_error(LeftBufSize, Status)) {
