@@ -39,6 +39,11 @@ else
 	uci -q set "turboacc.config.fullcone"="2"
 fi
 
+# SFP SerDes rate control: default to automatic, but never clobber an existing
+# choice (this file re-runs on package upgrade with config retention).
+uci -q get "turboacc.config.sfp_serdes1_mode" >/dev/null || \
+	uci -q set "turboacc.config.sfp_serdes1_mode"="auto"
+
 uci -q commit "turboacc"
 
 uci -q batch <<-EOF >/dev/null

@@ -38,6 +38,16 @@ var getMTKPPEStat = rpc.declare({
 	expect: { '': {} }
 });
 
+var getSFPStat = rpc.declare({
+	object: 'luci.turboacc',
+	method: 'getSFPStatus',
+	expect: { '': {} }
+});
+
+function getSFPStatus() {
+	return L.resolveDefault(getSFPStat(), {});
+}
+
 function getServiceStatus() {
 	return Promise.all([
 		L.resolveDefault(getFastPathStat(), {}),
@@ -1017,7 +1027,7 @@ function renderOverviewContent(state) {
 	]));
 }
 
-function buildForm(features, config) {
+function buildForm(features, config, sfp) {
 	var m = new form.Map('turboacc', _('TurboACC Configuration'),
 		_('Only commonly used options are shown; save & apply after changes.'));
 	var s = m.section(form.NamedSection, 'config', 'turboacc');
@@ -1215,6 +1225,49 @@ function buildForm(features, config) {
 		o.placeholder = '30';
 		o.depends({ fastpath: 'mediatek_hnat', fastpath_mh_eth_hnat: '1' });
 
+	}
+
+	// RTL837x SerDes1 feeds the SFP cage. SerDes0 is the CPU uplink and is
+	// intentionally not exposed: forcing it would cut the switch off from the SoC.
+	if (features.hasSFPSERDES) {
+		s.tab('sfp', _('SFP rate control'),
+			_('Force the SFP cage link rate on boards with a Realtek RTL837x switch.'));
+
+		o = s.taboption('sfp', form.DummyValue, '_sfp_status', _('Current SerDes state'));
+		o.cfgvalue = function() {
+			if (!sfp || sfp.available !== true)
+				return E('em', {}, _('Unavailable'));
+
+			var parts = [];
+
+			if (sfp.serdes1 != null)
+				parts.push(E('strong', {}, sfp.serdes1Name || '?') );
+
+			parts.push(E('span', {}, ' ' + (sfp.serdes1 != null
+				? '(SerDes1 = 0x' + Number(sfp.serdes1).toString(16) + ')' : '')));
+
+			parts.push(E('br'));
+			parts.push(E('span', {}, sfp.forced
+				? _('Forced to %s by configuration.').format(sfp.forcedName || sfp.forcedMode)
+				: _('Not forced; rate negotiated from the module.')));
+
+			return E('span', {}, parts);
+		};
+
+		o = s.taboption('sfp', form.ListValue, 'sfp_serdes1_mode', _('SFP link rate'));
+		o.description = _('Applied to RTL837x SerDes1 after save & apply, and re-applied on boot. ' +
+			'Changing this briefly drops the SFP link. ' +
+			'%sBe careful if your WAN runs over SFP only.%s%s' +
+			'Leave on Automatic unless the module misreports its rate.')
+			.format('<span style="color:var(--ta-danger,#b0374f)">', '</span>', '<br>');
+		o.value('auto', _('Automatic (use rate advertised by the module)'));
+		o.value('4', _('1000BASE-X (1G, SerDes 0x04)'));
+		o.value('18', _('HSGMII (2.5G, SerDes 0x12)'));
+		o.value('22', _('2500BASE-X (2.5G, SerDes 0x16)'));
+		o.value('26', _('10GBASE-R (10G, SerDes 0x1a)'));
+		o.default = 'auto';
+		o.widget = 'select';
+		o.rmempty = false;
 	}
 
 	return m;
@@ -1699,7 +1752,8 @@ return view.extend({
 			uci.load('turboacc'),
 			L.resolveDefault(getSystemFeatures(), {}),
 			L.resolveDefault(getServiceStatus(), []),
-			L.resolveDefault(getMTKPPEStatus(), {})
+			L.resolveDefault(getMTKPPEStatus(), {}),
+			L.resolveDefault(getSFPStatus(), {})
 		]);
 	},
 
@@ -1707,12 +1761,13 @@ return view.extend({
 		var features = data[1] || {};
 		var service = data[2] || [];
 		var ppeStats = data[3] || {};
+		var sfpStatus = data[4] || {};
 		var overviewRoot = E('div', { 'class': 'ta-overview-root' });
 		var page = applyThemeClass(E('div', { 'class': 'ta-page' }, [
 			renderStyle(),
 			overviewRoot
 		]), 'ta-dark');
-		var map = buildForm(features, getConfigState(features));
+		var map = buildForm(features, getConfigState(features), sfpStatus);
 
 		function refreshOverview(nextService, nextPpe) {
 			dom.content(overviewRoot, renderOverviewContent({

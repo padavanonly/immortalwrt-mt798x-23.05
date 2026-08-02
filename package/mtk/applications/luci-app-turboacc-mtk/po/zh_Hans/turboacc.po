@@ -693,3 +693,39 @@ msgstr "启用 IPv6 HNAT。"
 
 msgid "Default 30."
 msgstr "默认 30。"
+
+msgid "SFP rate control"
+msgstr "SFP 速率控制"
+
+msgid "Force the SFP cage link rate on boards with a Realtek RTL837x switch."
+msgstr "在搭载 Realtek RTL837x 交换机的板子上强制 SFP 笼子的链路速率。"
+
+msgid "Current SerDes state"
+msgstr "当前 SerDes 状态"
+
+msgid "Forced to %s by configuration."
+msgstr "已由配置强制为 %s。"
+
+msgid "Not forced; rate negotiated from the module."
+msgstr "未强制；速率由模块协商决定。"
+
+msgid "SFP link rate"
+msgstr "SFP 链路速率"
+
+msgid "Applied to RTL837x SerDes1 after save & apply, and re-applied on boot. Changing this briefly drops the SFP link. %sBe careful if your WAN runs over SFP only.%s%sLeave on Automatic unless the module misreports its rate."
+msgstr "保存并应用后写入 RTL837x SerDes1，并在开机时重新应用。切换会导致 SFP 链路瞬断，%s若 WAN 仅经由 SFP 请谨慎操作。%s%s除非模块上报的速率有误，否则请保持“自动”。"
+
+msgid "Automatic (use rate advertised by the module)"
+msgstr "自动（使用模块上报的速率）"
+
+msgid "1000BASE-X (1G, SerDes 0x04)"
+msgstr "1000BASE-X (1G, SerDes 0x04)"
+
+msgid "HSGMII (2.5G, SerDes 0x12)"
+msgstr "HSGMII (2.5G, SerDes 0x12)"
+
+msgid "2500BASE-X (2.5G, SerDes 0x16)"
+msgstr "2500BASE-X (2.5G, SerDes 0x16)"
+
+msgid "10GBASE-R (10G, SerDes 0x1a)"
+msgstr "10GBASE-R (10G, SerDes 0x1a)"

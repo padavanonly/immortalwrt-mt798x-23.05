@@ -88,6 +88,87 @@ default_fullcone_mode() {
 }
 
 # ---------------------------------------------------------------------------
+# SFP SerDes rate control (RTL837x boards only)
+#
+# SerDes1 drives the SFP cage. SerDes0 is the CPU uplink and is never touched
+# here: forcing it would cut the switch off from the SoC.
+# The driver treats the value 1 as "release force mode" (auto).
+# ---------------------------------------------------------------------------
+SFP_SERDES_AUTO="1"
+
+# Locate the swconfig device exposing the RTL837x serdes attributes.
+# Prints nothing and returns 1 on boards without such a switch.
+sfp_serdes_dev() {
+	local dev
+
+	command -v swconfig >/dev/null 2>&1 || return 1
+
+	for dev in $(swconfig list 2>/dev/null | grep -oE 'switch[0-9]+'); do
+		if swconfig dev "$dev" help 2>/dev/null | grep -q "serdes1_force_mode"; then
+			printf '%s\n' "$dev"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+# Only modes that are meaningful and non-bricking on an SFP cage.
+sfp_serdes_mode_valid() {
+	case "$1" in
+		"$SFP_SERDES_AUTO"|4|18|22|26) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+apply_sfp_serdes() {
+	local mode dev current i
+
+	config_get mode "config" "sfp_serdes1_mode" "auto"
+	[ -n "$mode" ] || mode="auto"
+	[ "$mode" = "auto" ] && mode="$SFP_SERDES_AUTO"
+
+	if ! sfp_serdes_mode_valid "$mode"; then
+		logger -t turboacc "WARNING: ignoring invalid sfp_serdes1_mode=$mode"
+		return 0
+	fi
+
+	# Fast path: with no force mode requested there is nothing to re-apply, so
+	# don't pay the probe retry cost on boards without an RTL837x switch --
+	# which is the overwhelming majority of filogic devices shipping this app.
+	if [ "$mode" = "$SFP_SERDES_AUTO" ]; then
+		dev="$(sfp_serdes_dev)" || return 0
+	else
+		# The switch driver may still be probing right after boot.
+		for i in 1 2 3 4 5 6 7 8 9 10; do
+			dev="$(sfp_serdes_dev)" && break
+			sleep 0.5
+		done
+	fi
+
+	if [ -z "$dev" ]; then
+		logger -t turboacc "WARNING: sfp_serdes1_mode=$mode requested but no RTL837x switch found"
+		return 0
+	fi
+
+	# Idempotent: any turboacc uci change restarts this service, and re-applying
+	# a force mode needlessly bounces the SFP link.
+	current="$(swconfig dev "$dev" get serdes1_force_mode 2>/dev/null | grep -oE '[0-9]+$' | tail -n1)"
+	[ -n "$current" ] || current="$SFP_SERDES_AUTO"
+
+	if [ "$current" = "$mode" ]; then
+		logger -t turboacc "sfp serdes1 already at mode $mode on $dev, unchanged"
+		return 0
+	fi
+
+	if swconfig dev "$dev" set serdes1_force_mode "$mode" 2>/dev/null; then
+		logger -t turboacc "sfp serdes1 mode $current -> $mode on $dev"
+	else
+		logger -t turboacc "WARNING: failed to set serdes1_force_mode=$mode on $dev"
+	fi
+}
+
+# ---------------------------------------------------------------------------
 # procd lifecycle
 # ---------------------------------------------------------------------------
 stop_service() {
@@ -214,6 +295,9 @@ start_service() {
 	else
 		logger -t turboacc "WARNING: tcpcca=$tcpcca not available, keeping current"
 	fi
+
+	# ---------- SFP SerDes rate control ----------
+	apply_sfp_serdes
 
 	logger -t turboacc "started (fastpath=$fastpath fullcone=$fullcone tcpcca=$tcpcca)"
 }

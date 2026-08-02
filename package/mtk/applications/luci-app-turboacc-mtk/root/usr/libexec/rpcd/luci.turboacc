@@ -61,6 +61,74 @@ local function has_mediatek_wireless_dat()
 		sys.call("set -- /etc/wireless/mediatek/*.dat; [ -e \"$1\" ]") == 0
 end
 
+-- RTL837x SerDes1 drives the SFP cage. SerDes0 is the CPU uplink and is
+-- deliberately never exposed here: forcing it would cut the switch off from
+-- the SoC entirely.
+local SERDES_MODE_NAMES = {
+	[0x02] = "SGMII",
+	[0x04] = "1000BASE-X",
+	[0x05] = "100BASE-FX",
+	[0x0D] = "10GBASE-USXGMII",
+	[0x12] = "HSGMII (2.5G)",
+	[0x16] = "2500BASE-X",
+	[0x1A] = "10GBASE-R",
+	[0x1F] = "Off",
+	[0x21] = "RTL8221B",
+	[0x22] = "On"
+}
+
+local swconfig_dev_cache = nil
+
+-- Find the swconfig device exposing the RTL837x serdes attributes. Returns
+-- nil on boards without an RTL837x switch, which is the common case.
+local function swconfig_dev()
+	if swconfig_dev_cache ~= nil then
+		return swconfig_dev_cache or nil
+	end
+
+	swconfig_dev_cache = false
+
+	if not fs.access("/sbin/swconfig") and not fs.access("/usr/sbin/swconfig") then
+		return nil
+	end
+
+	local list = util.exec("swconfig list 2>/dev/null") or ""
+	local dev
+
+	for dev in list:gmatch("(switch%d+)") do
+		local help = util.exec("swconfig dev " .. dev .. " help 2>/dev/null") or ""
+		if help:find("serdes1_force_mode", 1, true) then
+			swconfig_dev_cache = dev
+			return dev
+		end
+	end
+
+	return nil
+end
+
+-- swconfig prints global attributes as "name: value"; tolerate a bare value too.
+local function swconfig_get(dev, attr)
+	local out = util.exec("swconfig dev " .. dev .. " get " .. attr .. " 2>/dev/null") or ""
+
+	out = out:gsub("^%s*" .. attr .. "%s*:%s*", "")
+
+	return (out:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- Take the LAST integer in the string: the attribute name itself contains
+-- digits ("serdes1_force_mode"), so a leading match would read back "1",
+-- which is exactly the driver's "no force mode" sentinel.
+local function swconfig_get_int(dev, attr)
+	local value = nil
+	local n
+
+	for n in swconfig_get(dev, attr):gmatch("%-?%d+") do
+		value = n
+	end
+
+	return tonumber(value or "")
+end
+
 local methods = {
 	getSystemFeatures = {
 		call = function()
@@ -76,7 +144,8 @@ local methods = {
 					module_loaded({ "mtkhnat", "mediatek_hnat" }) or
 					fs.stat("/sys/kernel/debug/hnat", "type") == "dir",
 				hasXTFULLCONENAT  = module_file_exists(kernel, { "xt_FULLCONENAT" }) or module_loaded({ "xt_FULLCONENAT" }),
-				hasTCPCCA         = readfile("/proc/sys/net/ipv4/tcp_available_congestion_control")
+				hasTCPCCA         = readfile("/proc/sys/net/ipv4/tcp_available_congestion_control"),
+				hasSFPSERDES      = swconfig_dev() ~= nil
 			}
 			print(json.stringify(features))
 		end
@@ -125,6 +194,53 @@ local methods = {
 			local ccatype = readfile("/proc/sys/net/ipv4/tcp_congestion_control")
 			ccatype = ccatype and ccatype:upper() or nil
 			print(json.stringify({ type = ccatype }))
+		end
+	},
+	getSFPStatus = {
+		call = function()
+			local dev = swconfig_dev()
+
+			if not dev then
+				print(json.stringify({ available = false }))
+				return
+			end
+
+			local status = { available = true, device = dev }
+
+			-- "Serdes0: 0x1a Serdes1: 0x4"
+			local raw = swconfig_get(dev, "serdes_mode_get")
+			local sds0, sds1 = raw:match("Serdes0:%s*(0?x?%x+).-Serdes1:%s*(0?x?%x+)")
+
+			if sds1 then
+				local mode = tonumber(sds1) or tonumber(sds1:match("x(%x+)") or "", 16)
+
+				if mode then
+					status.serdes1 = mode
+					status.serdes1Name = SERDES_MODE_NAMES[mode] or string.format("Unknown (0x%x)", mode)
+				end
+			end
+
+			if sds0 then
+				local mode = tonumber(sds0) or tonumber(sds0:match("x(%x+)") or "", 16)
+
+				if mode then
+					status.serdes0 = mode
+					status.serdes0Name = SERDES_MODE_NAMES[mode] or string.format("Unknown (0x%x)", mode)
+				end
+			end
+
+			-- The driver reports 1 when no force mode is active.
+			local forced = swconfig_get_int(dev, "serdes1_force_mode")
+
+			if forced and forced ~= 1 then
+				status.forced = true
+				status.forcedMode = forced
+				status.forcedName = SERDES_MODE_NAMES[forced] or string.format("Unknown (0x%x)", forced)
+			else
+				status.forced = false
+			end
+
+			print(json.stringify(status))
 		end
 	},
 	getMTKPPEStat = {
