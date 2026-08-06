@@ -1,6 +1,19 @@
+From: medyma <aneylovemzy@gmail.com>
+Date: Sat, 1 Aug 2026 00:00:00 +0800
+Subject: [PATCH 6.6] net: sfp: backport upstream fixes
+
+Replace the legacy tx_fault_ignore flag with state_ignore_mask, refresh
+the quirk table (Hisense, HSGQ, Lantech, Turris, etc.), fix UBNT mode
+advertisement, and drop stale checks and warnings.
+
+Signed-off-by: medyma <aneylovemzy@gmail.com>
+---
+
+diff --git a/drivers/net/phy/sfp.c b/drivers/net/phy/sfp.c
+index a9138d2..3f6873a 100644
 --- a/drivers/net/phy/sfp.c
 +++ b/drivers/net/phy/sfp.c
-@@ -270,6 +270,7 @@ struct sfp {
+@@ -271,6 +271,7 @@ struct sfp {
  	unsigned int state_hw_drive;
  	unsigned int state_hw_mask;
  	unsigned int state_soft_mask;
@@ -8,7 +21,7 @@
  	unsigned int state;
  
  	struct delayed_work poll;
-@@ -294,7 +295,6 @@ struct sfp {
+@@ -299,7 +300,6 @@ struct sfp {
  	unsigned int rs_state_mask;
  
  	bool have_a2;
@@ -16,7 +29,7 @@
  
  	const struct sfp_quirk *quirk;
  
-@@ -392,9 +392,35 @@ static void sfp_fixup_long_startup(struc
+@@ -393,9 +393,35 @@ static void sfp_fixup_long_startup(struct sfp *sfp)
  	sfp->module_t_start_up = T_START_UP_BAD_GPON;
  }
  
@@ -53,7 +66,7 @@
  }
  
  // For 10GBASE-T short-reach modules
-@@ -439,7 +465,19 @@ static void sfp_fixup_halny_gsfp(struct
+@@ -440,7 +466,19 @@ static void sfp_fixup_halny_gsfp(struct sfp *sfp)
  	 * these are possibly used for other purposes on this
  	 * module, e.g. a serial port.
  	 */
@@ -74,7 +87,7 @@
  }
  
  static void sfp_fixup_rollball_cc(struct sfp *sfp)
-@@ -483,10 +521,17 @@ static void sfp_quirk_ubnt_uf_instant(co
+@@ -484,10 +522,17 @@ static void sfp_quirk_ubnt_uf_instant(const struct sfp_eeprom_id *id,
  {
  	/* Ubiquiti U-Fiber Instant module claims that support all transceiver
  	 * types including 10G Ethernet which is not truth. So clear all claimed
@@ -93,7 +106,7 @@
  }
  
  #define SFP_QUIRK(_v, _p, _m, _f) \
-@@ -503,7 +548,12 @@ static const struct sfp_quirk sfp_quirks
+@@ -504,7 +549,12 @@ static const struct sfp_quirk sfp_quirks[] = {
  	// Alcatel Lucent G-010S-A can operate at 2500base-X, but report 3.2GBd
  	// NRZ in their EEPROM
  	SFP_QUIRK("ALCATELLUCENT", "3FE46541AA", sfp_quirk_2500basex,
@@ -107,7 +120,7 @@
  
  	// Fiberstore SFP-10G-T doesn't identify as copper, uses the Rollball
  	// protocol to talk to the PHY and needs 4 sec wait before probing the
-@@ -531,6 +581,8 @@ static const struct sfp_quirk sfp_quirks
+@@ -531,6 +581,8 @@ static const struct sfp_quirk sfp_quirks[] = {
  
  	SFP_QUIRK_F("HALNy", "HL-GSFP", sfp_fixup_halny_gsfp),
  
@@ -116,7 +129,7 @@
  	// HG MXPD-483II-F 2.5G supports 2500Base-X, but incorrectly reports
  	// 2600MBd in their EERPOM
  	SFP_QUIRK_M("HG GENUINE", "MXPD-483II", sfp_quirk_2500basex),
-@@ -538,14 +590,31 @@ static const struct sfp_quirk sfp_quirks
+@@ -538,14 +590,31 @@ static const struct sfp_quirk sfp_quirks[] = {
  	// Huawei MA5671A can operate at 2500base-X, but report 1.2GBd NRZ in
  	// their EEPROM
  	SFP_QUIRK("HUAWEI", "MA5671A", sfp_quirk_2500basex,
@@ -134,14 +147,14 @@
 +	// 1000BASE-LX / 1300MBd in its EEPROM
 +	SFP_QUIRK("Hisense", "ZNID-GPON-2311NA", sfp_quirk_2500basex,
 +		  sfp_fixup_ignore_tx_fault),
-+
+ 
+-	// Lantech 8330-262D-E can operate at 2500base-X, but incorrectly report
+-	// 2500MBd NRZ in their EEPROM
 +	// HSGQ HSGQ-XPON-Stick can operate at 2500base-X, but reports
 +	// 1000BASE-LX / 1300MBd in its EEPROM
 +	SFP_QUIRK("HSGQ", "HSGQ-XPON-Stick", sfp_quirk_2500basex,
 +		  sfp_fixup_ignore_tx_fault),
- 
--	// Lantech 8330-262D-E can operate at 2500base-X, but incorrectly report
--	// 2500MBd NRZ in their EEPROM
++
 +	// Lantech 8330-262D-E and 8330-265D can operate at 2500base-X, but
 +	// incorrectly report 2500MBd NRZ in their EEPROM.
 +	// Some 8330-265D modules have inverted LOS, while all of them report
@@ -152,7 +165,7 @@
  
  	SFP_QUIRK_M("UBNT", "UF-INSTANT", sfp_quirk_ubnt_uf_instant),
  
-@@ -554,6 +623,8 @@ static const struct sfp_quirk sfp_quirks
+@@ -554,6 +623,8 @@ static const struct sfp_quirk sfp_quirks[] = {
  	SFP_QUIRK_F("Walsun", "HXSX-ATRC-1", sfp_fixup_fs_10gt),
  	SFP_QUIRK_F("Walsun", "HXSX-ATRI-1", sfp_fixup_fs_10gt),
  
@@ -161,7 +174,7 @@
  	// OEM SFP-GE-T is a 1000Base-T module with broken TX_FAULT indicator
  	SFP_QUIRK_F("OEM", "SFP-GE-T", sfp_fixup_ignore_tx_fault),
  
-@@ -566,6 +637,7 @@ static const struct sfp_quirk sfp_quirks
+@@ -566,6 +637,7 @@ static const struct sfp_quirk sfp_quirks[] = {
  	SFP_QUIRK_F("OEM", "RTSFP-10", sfp_fixup_rollball_cc),
  	SFP_QUIRK_F("OEM", "RTSFP-10G", sfp_fixup_rollball_cc),
  	SFP_QUIRK_F("OEM", "TNBYV02-C0X-C3", sfp_fixup_rollball_cc),
@@ -169,7 +182,7 @@
  	SFP_QUIRK_F("Turris", "RTSFP-10", sfp_fixup_rollball),
  	SFP_QUIRK_F("Turris", "RTSFP-10G", sfp_fixup_rollball),
  	SFP_QUIRK_F("JESS-LINK", "P60000BBC001-1", sfp_fixup_rollball),
-@@ -879,7 +951,8 @@ static void sfp_soft_start_poll(struct s
+@@ -883,7 +955,8 @@ static void sfp_soft_start_poll(struct sfp *sfp)
  
  	mutex_lock(&sfp->st_mutex);
  	// Poll the soft state for hardware pins we want to ignore
@@ -179,47 +192,42 @@
  
  	if (sfp->state_soft_mask & (SFP_F_LOS | SFP_F_TX_FAULT) &&
  	    !sfp->need_poll)
-@@ -2319,6 +2392,10 @@ static int sfp_sm_mod_probe(struct sfp *
- 	 * is really required and we have no other option.
- 	 */
- 	if (sfp_id_needs_byte_io(sfp, &id.base, sizeof(id.base))) {
-+		dev_info(sfp->dev,
-+			 "Detected broken RTL8672/RTL9601C emulated EEPROM\n");
+@@ -2325,6 +2398,8 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
+ 		else
+ 			dev_info(sfp->dev,
+ 				 "Detected broken RTL8672/RTL9601C emulated EEPROM\n");
 +		dev_info(sfp->dev,
 +			 "Switching to reading EEPROM to one byte at a time\n");
- 		sfp->i2c_block_size = 1;
+ 	}
  
- 		ret = sfp_read(sfp, false, 0, &id.base, sizeof(id.base));
-@@ -2471,7 +2548,7 @@ static int sfp_sm_mod_probe(struct sfp *
+ 	/* Cotsworks do not seem to update the checksums when they
+@@ -2448,7 +2523,7 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
  	sfp->module_t_wait = T_WAIT;
  	sfp->phy_t_retry = T_PHY_RETRY;
  
 -	sfp->tx_fault_ignore = false;
 +	sfp->state_ignore_mask = 0;
+ 	sfp->no_rollball_bridge = false;
+ 	sfp->sm_reprobe_enabled = false;
  
- 	if (sfp->id.base.extended_cc == SFF8024_ECC_10GBASE_T_SFI ||
- 	    sfp->id.base.extended_cc == SFF8024_ECC_10GBASE_T_SR ||
-@@ -2494,6 +2571,9 @@ static int sfp_sm_mod_probe(struct sfp *
- 
+@@ -2474,6 +2549,8 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
  	if (sfp->quirk && sfp->quirk->fixup)
  		sfp->quirk->fixup(sfp);
-+
+ 
 +	sfp->state_hw_mask &= ~sfp->state_ignore_mask;
 +
- 	/* Enable reprobe watchdog only for copper SFP+ modules (e.g.
- 	 * RTL8261BE-based) that may change advertised speeds after
- 	 * link partner negotiation. GPON/fiber are unaffected.
-@@ -2752,8 +2832,7 @@ static void sfp_sm_main(struct sfp *sfp,
+ 	mutex_unlock(&sfp->st_mutex);
+ 
+ 	return 0;
+@@ -2725,7 +2802,6 @@ static void sfp_sm_main(struct sfp *sfp, unsigned int event)
  			 * or t_start_up, so assume there is a fault.
  			 */
  			sfp_sm_fault(sfp, SFP_S_INIT_TX_FAULT,
 -				     !sfp->tx_fault_ignore &&
--				     (sfp->sm_fault_retries == N_FAULT_INIT));
-+				     sfp->sm_fault_retries == N_FAULT_INIT);
+ 				     (sfp->sm_fault_retries == N_FAULT_INIT));
  		} else if (event == SFP_E_TIMEOUT || event == SFP_E_TX_CLEAR) {
  	init_done:
- 			/* Create mdiobus and start trying for PHY */
-@@ -3024,12 +3103,7 @@ static void sfp_check_state(struct sfp *
+@@ -2998,12 +3074,7 @@ static void sfp_check_state(struct sfp *sfp)
  	mutex_lock(&sfp->st_mutex);
  	state = sfp_get_state(sfp);
  	changed = state ^ sfp->state;
@@ -233,3 +241,8 @@
  
  	for (i = 0; i < GPIO_MAX; i++)
  		if (changed & BIT(i))
+@@ -3330,3 +3401,4 @@ module_exit(sfp_exit);
+ MODULE_ALIAS("platform:sfp");
+ MODULE_AUTHOR("Russell King");
+ MODULE_LICENSE("GPL v2");
++MODULE_DESCRIPTION("SFP cage support");

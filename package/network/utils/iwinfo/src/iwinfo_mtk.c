@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <inttypes.h>
 #include "iwinfo.h"
 #include "iwinfo_wext.h"
@@ -5,52 +6,77 @@
 
 #include "iwinfo_mtk_ccode.c"
 
+static int mtk_get_freqlist(const char *dev, char *buf, int *len);
+static int mtk_get_assoclist(const char *dev, char *buf, int *len);
+static int mtk_get_assoc_bitrate(const char *dev, int *buf);
+
 static inline int mtk_ioctl(const char *ifname, int cmd, struct iwreq *wrq)
 {
 	strncpy(wrq->ifr_name, ifname, IFNAMSIZ);
 	return iwinfo_ioctl(cmd, wrq);
 }
 
-static const char *mtk_dev2phy(const char *devname)
+static int mtk_is_ifname(const char *devname)
 {
-	const char *phy = NULL;
-	struct uci_section *s;
+	const char *suffix;
 
-	if (strstr(devname,"ra") || strstr(devname,"apcli"))
-		return devname;
+	if (!strncmp(devname, "apcli", 5))
+		suffix = devname + 5;
+	else if (!strncmp(devname, "ra", 2) &&
+		 strncmp(devname, "radio", 5))
+		suffix = devname + 2;
+	else
+		return 0;
+
+	if (*suffix == 'i' || *suffix == 'x' || *suffix == 'e')
+		suffix++;
+
+	if (!isdigit((unsigned char)*suffix))
+		return 0;
+
+	while (isdigit((unsigned char)*suffix))
+		suffix++;
+
+	return *suffix == '\0';
+}
+
+static int mtk_dev2phy(const char *devname, char ifname[IFNAMSIZ])
+{
+	struct uci_section *s;
+	const char *phy = NULL;
+	int ret = -1;
+
+	if (mtk_is_ifname(devname)) {
+		if (strlen(devname) >= IFNAMSIZ)
+			return -1;
+
+		strncpy(ifname, devname, IFNAMSIZ - 1);
+		ifname[IFNAMSIZ - 1] = '\0';
+		return 0;
+	}
 
 	s = iwinfo_uci_get_radio(devname, "mtwifi");
 	if (!s)
 		goto out;
-	
-	phy = uci_lookup_option_string(uci_ctx, s, "phy");
-
-out:
-	iwinfo_uci_free();
-	return phy;
-}
-
-static int mtk_probe(const char *dev)
-{
-	const char *phy = NULL;
-	struct uci_section *s;
-
-	if (strstr(dev,"ra") || strstr(dev,"apcli"))
-		return true;
-
-	s = iwinfo_uci_get_radio(dev, "mtwifi");
-	if (!s)
-		goto out;
 
 	phy = uci_lookup_option_string(uci_ctx, s, "phy");
-	if (phy) {
-		iwinfo_uci_free();
-		return true;
+
+	if (phy && *phy && strlen(phy) < IFNAMSIZ) {
+		strncpy(ifname, phy, IFNAMSIZ - 1);
+		ifname[IFNAMSIZ - 1] = '\0';
+		ret = 0;
 	}
 
 out:
 	iwinfo_uci_free();
-	return false;
+	return ret;
+}
+
+static int mtk_probe(const char *dev)
+{
+	char ifname[IFNAMSIZ];
+
+	return !mtk_dev2phy(dev, ifname);
 }
 
 static void mtk_close(void)
@@ -60,9 +86,10 @@ static void mtk_close(void)
 
 static int mtk_is_ifup(const char *ifname)
 {
-	struct ifreq ifr;
+	struct ifreq ifr = {};
 
 	strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+	ifr.ifr_name[IFNAMSIZ - 1] = '\0';
 
 	if (iwinfo_ioctl(SIOCGIFFLAGS, &ifr) >= 0)
 	{
@@ -73,13 +100,356 @@ static int mtk_is_ifup(const char *ifname)
 	return 0;
 }
 
+static int mtk_get_band_from_uci(const char *dev, int *buf)
+{
+	struct uci_section *s;
+	const char *band = NULL;
+	int ret = -1;
+
+	s = iwinfo_uci_get_radio(dev, "mtwifi");
+	if (!s)
+		goto out;
+
+	band = uci_lookup_option_string(uci_ctx, s, "band");
+	if (!band)
+		goto out;
+
+	if (!strcmp(band, "2g"))
+		*buf = MTK_CH_BAND_24G;
+	else if (!strcmp(band, "5g"))
+		*buf = MTK_CH_BAND_5G;
+	else if (!strcmp(band, "6g"))
+		*buf = MTK_CH_BAND_6G;
+	else
+		goto out;
+
+	ret = 0;
+
+out:
+	iwinfo_uci_free();
+	return ret;
+}
+
+static int mtk_get_band(const char *dev, int *buf)
+{
+	char ifname[IFNAMSIZ];
+	struct iwreq wrq = {};
+	unsigned char band = 0;
+
+	if (!mtk_get_band_from_uci(dev, buf))
+		return 0;
+
+	if (mtk_dev2phy(dev, ifname))
+		return -1;
+
+	if (!mtk_is_ifup(ifname))
+		return -1;
+
+	wrq.u.data.length = sizeof(band);
+	wrq.u.data.pointer = &band;
+	wrq.u.data.flags = OID_GET_WIRELESS_BAND;
+
+	if (mtk_ioctl(ifname, RT_PRIV_IOCTL, &wrq) >= 0 &&
+	    band <= MTK_CH_BAND_6G) {
+		*buf = band;
+		return 0;
+	}
+
+	return -1;
+}
+
+static int mtk_get_phy_mode(const char *dev, unsigned long *buf)
+{
+	char ifname[IFNAMSIZ];
+	struct iwreq wrq = {};
+
+	if (mtk_dev2phy(dev, ifname))
+		return -1;
+
+	if (!mtk_is_ifup(ifname))
+		return -1;
+
+	wrq.u.data.length = sizeof(*buf);
+	wrq.u.data.pointer = buf;
+	wrq.u.data.flags = RT_OID_802_11_PHY_MODE;
+
+	if (mtk_ioctl(ifname, RT_PRIV_IOCTL, &wrq) >= 0)
+		return 0;
+
+	return -1;
+}
+
+static int mtk_band_from_frequency(int mhz)
+{
+	if (mhz >= 5925 && mhz <= 7125)
+		return MTK_CH_BAND_6G;
+	if (mhz >= 4910 && mhz < 5925)
+		return MTK_CH_BAND_5G;
+	if (mhz >= 2400 && mhz < 2500)
+		return MTK_CH_BAND_24G;
+
+	return -1;
+}
+
+static int mtk_channel_to_frequency(int channel, int band)
+{
+	if (channel <= 0)
+		return -1;
+
+	switch (band) {
+	case MTK_CH_BAND_24G:
+		return (channel == 14) ? 2484 : 2407 + channel * 5;
+
+	case MTK_CH_BAND_5G:
+		if (channel >= 182 && channel <= 196)
+			return 4000 + channel * 5;
+		return 5000 + channel * 5;
+
+	case MTK_CH_BAND_6G:
+		return (channel == 2) ? 5935 : 5950 + channel * 5;
+
+	default:
+		if (channel <= 13)
+			return 2407 + channel * 5;
+		if (channel == 14)
+			return 2484;
+		if (channel >= 182 && channel <= 196)
+			return 4000 + channel * 5;
+		return 5000 + channel * 5;
+	}
+}
+
+static int mtk_iwinfo_band(int band)
+{
+	switch (band) {
+	case MTK_CH_BAND_24G:
+		return IWINFO_BAND_24;
+
+	case MTK_CH_BAND_5G:
+		return IWINFO_BAND_5;
+
+	case MTK_CH_BAND_6G:
+		return IWINFO_BAND_6;
+
+	default:
+		return 0;
+	}
+}
+
+static int mtk_band_supports_n(int band, unsigned long wmode)
+{
+	switch (band) {
+	case MTK_CH_BAND_24G:
+		return !!(wmode & WMODE_GN);
+
+	case MTK_CH_BAND_5G:
+		return !!(wmode & WMODE_AN);
+
+	default:
+		return 0;
+	}
+}
+
+static int mtk_band_supports_ax(int band, unsigned long wmode)
+{
+	switch (band) {
+	case MTK_CH_BAND_24G:
+		return !!(wmode & WMODE_AX_24G);
+
+	case MTK_CH_BAND_5G:
+		return !!(wmode & WMODE_AX_5G);
+
+	case MTK_CH_BAND_6G:
+		return !!(wmode & WMODE_AX_6G);
+
+	default:
+		return 0;
+	}
+}
+
+static int mtk_band_supports_be(int band, unsigned long wmode)
+{
+	switch (band) {
+	case MTK_CH_BAND_24G:
+		return !!(wmode & WMODE_BE_24G);
+
+	case MTK_CH_BAND_5G:
+		return !!(wmode & WMODE_BE_5G);
+
+	case MTK_CH_BAND_6G:
+		return !!(wmode & WMODE_BE_6G);
+
+	default:
+		return 0;
+	}
+}
+
+static void mtk_set_hwmodelist_for_band(int band, unsigned long wmode, int *buf)
+{
+	*buf = 0;
+
+	switch (band) {
+	case MTK_CH_BAND_24G:
+		*buf = (IWINFO_80211_B | IWINFO_80211_G);
+		break;
+
+	case MTK_CH_BAND_6G:
+		break;
+
+	case MTK_CH_BAND_5G:
+	default:
+		*buf = IWINFO_80211_A;
+		break;
+	}
+
+	if (!wmode) {
+		switch (band) {
+		case MTK_CH_BAND_24G:
+			*buf |= (IWINFO_80211_N | IWINFO_80211_AX |
+				 IWINFO_80211_BE);
+			break;
+
+		case MTK_CH_BAND_6G:
+			*buf |= (IWINFO_80211_AX | IWINFO_80211_BE);
+			break;
+
+		case MTK_CH_BAND_5G:
+		default:
+			*buf |= (IWINFO_80211_N | IWINFO_80211_AC |
+				 IWINFO_80211_AX | IWINFO_80211_BE);
+			break;
+		}
+
+		return;
+	}
+
+	if (mtk_band_supports_n(band, wmode))
+		*buf |= IWINFO_80211_N;
+
+	if (band != MTK_CH_BAND_6G && WMODE_CAP_AC(wmode))
+		*buf |= IWINFO_80211_AC;
+
+	if (mtk_band_supports_ax(band, wmode))
+		*buf |= IWINFO_80211_AX;
+
+	if (mtk_band_supports_be(band, wmode))
+		*buf |= IWINFO_80211_BE;
+
+	if (!*buf) {
+		switch (band) {
+		case MTK_CH_BAND_24G:
+			*buf = (IWINFO_80211_B | IWINFO_80211_G);
+			break;
+
+		case MTK_CH_BAND_5G:
+			*buf = IWINFO_80211_A;
+			break;
+
+		default:
+			break;
+		}
+	}
+
+	if (band == MTK_CH_BAND_6G)
+		*buf &= ~(IWINFO_80211_A | IWINFO_80211_B |
+			  IWINFO_80211_G | IWINFO_80211_N |
+			  IWINFO_80211_AC);
+	else if (band == MTK_CH_BAND_24G)
+		*buf &= ~IWINFO_80211_A;
+}
+
+static void mtk_set_htmodelist_for_band(int band, unsigned long wmode,
+					int *buf)
+{
+	*buf = 0;
+
+	if (!wmode) {
+		switch (band) {
+		case MTK_CH_BAND_24G:
+			*buf = (IWINFO_HTMODE_HT20 | IWINFO_HTMODE_HT40 |
+				IWINFO_HTMODE_HE20 | IWINFO_HTMODE_HE40 |
+				IWINFO_HTMODE_EHT20 | IWINFO_HTMODE_EHT40);
+			break;
+
+		case MTK_CH_BAND_6G:
+			*buf = (IWINFO_HTMODE_HE20 | IWINFO_HTMODE_HE40 |
+				IWINFO_HTMODE_HE80 | IWINFO_HTMODE_HE80_80 |
+				IWINFO_HTMODE_HE160 |
+				IWINFO_HTMODE_EHT20 | IWINFO_HTMODE_EHT40 |
+				IWINFO_HTMODE_EHT80 | IWINFO_HTMODE_EHT80_80 |
+				IWINFO_HTMODE_EHT160 | IWINFO_HTMODE_EHT320);
+			break;
+
+		case MTK_CH_BAND_5G:
+		default:
+			*buf = (IWINFO_HTMODE_HT20 | IWINFO_HTMODE_HT40 |
+				IWINFO_HTMODE_VHT20 | IWINFO_HTMODE_VHT40 |
+				IWINFO_HTMODE_VHT80 | IWINFO_HTMODE_VHT80_80 |
+				IWINFO_HTMODE_VHT160 |
+				IWINFO_HTMODE_HE20 | IWINFO_HTMODE_HE40 |
+				IWINFO_HTMODE_HE80 | IWINFO_HTMODE_HE80_80 |
+				IWINFO_HTMODE_HE160 |
+				IWINFO_HTMODE_EHT20 | IWINFO_HTMODE_EHT40 |
+				IWINFO_HTMODE_EHT80 | IWINFO_HTMODE_EHT80_80 |
+				IWINFO_HTMODE_EHT160);
+			break;
+		}
+
+		return;
+	}
+
+	if (mtk_band_supports_n(band, wmode))
+		*buf |= (IWINFO_HTMODE_HT20 | IWINFO_HTMODE_HT40);
+
+	if (band != MTK_CH_BAND_6G && WMODE_CAP_AC(wmode)) {
+		*buf |= (IWINFO_HTMODE_VHT20 | IWINFO_HTMODE_VHT40);
+
+		if (band == MTK_CH_BAND_5G)
+			*buf |= (IWINFO_HTMODE_VHT80 |
+				 IWINFO_HTMODE_VHT80_80 |
+				 IWINFO_HTMODE_VHT160);
+	}
+
+	if (mtk_band_supports_ax(band, wmode)) {
+		*buf |= (IWINFO_HTMODE_HE20 | IWINFO_HTMODE_HE40);
+
+		if (band != MTK_CH_BAND_24G)
+			*buf |= (IWINFO_HTMODE_HE80 |
+				 IWINFO_HTMODE_HE80_80 |
+				 IWINFO_HTMODE_HE160);
+	}
+
+	if (mtk_band_supports_be(band, wmode)) {
+		*buf |= (IWINFO_HTMODE_EHT20 | IWINFO_HTMODE_EHT40);
+
+		if (band != MTK_CH_BAND_24G)
+			*buf |= (IWINFO_HTMODE_EHT80 |
+				 IWINFO_HTMODE_EHT80_80 |
+				 IWINFO_HTMODE_EHT160);
+
+		if (band == MTK_CH_BAND_6G)
+			*buf |= IWINFO_HTMODE_EHT320;
+	}
+
+	if (!*buf) {
+		switch (band) {
+		case MTK_CH_BAND_24G:
+		case MTK_CH_BAND_5G:
+			*buf = (IWINFO_HTMODE_HT20 | IWINFO_HTMODE_HT40);
+			break;
+
+		default:
+			break;
+		}
+	}
+}
+
 static int mtk_get_mode(const char *dev, int *buf)
 {
 	struct iwreq wrq;
-	const char *ifname;
+	char ifname[IFNAMSIZ];
 
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
+	if (mtk_dev2phy(dev, ifname))
 		return -1;
 
 	if(mtk_ioctl(ifname, SIOCGIWMODE, &wrq) >= 0)
@@ -116,10 +486,9 @@ static int mtk_get_mode(const char *dev, int *buf)
 static int mtk_get_ssid(const char *dev, char *buf)
 {
 	struct iwreq wrq = {};
-	const char *ifname;
+	char ifname[IFNAMSIZ];
 
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
+	if (mtk_dev2phy(dev, ifname))
 		return -1;
 
 	wrq.u.essid.pointer = buf;
@@ -134,10 +503,9 @@ static int mtk_get_ssid(const char *dev, char *buf)
 static int mtk_get_bssid(const char *dev, char *buf)
 {
 	struct iwreq wrq;
-	const char *ifname;
+	char ifname[IFNAMSIZ];
 
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
+	if (mtk_dev2phy(dev, ifname))
 		return -1;
 
 	if(mtk_ioctl(ifname, SIOCGIWAP, &wrq) >= 0)
@@ -153,18 +521,48 @@ static int mtk_get_bssid(const char *dev, char *buf)
 	return -1;
 }
 
+static int mtk_is_eht320(const char *dev)
+{
+	struct uci_section *s;
+	const char *htmode = NULL;
+	int ret = 0;
+
+	s = iwinfo_uci_get_radio(dev, "mtwifi");
+	if (!s)
+		goto out;
+
+	htmode = uci_lookup_option_string(uci_ctx, s, "htmode");
+	if (htmode && !strcmp(htmode, "EHT320"))
+		ret = 1;
+
+out:
+	iwinfo_uci_free();
+	return ret;
+}
+
 static int mtk_get_bitrate(const char *dev, int *buf)
 {
 	struct iwreq wrq;
-	const char *ifname;
+	char ifname[IFNAMSIZ];
+	uint64_t bitrate;
+	int eht320;
 
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
+	if (!mtk_get_assoc_bitrate(dev, buf))
+		return 0;
+
+	if (mtk_dev2phy(dev, ifname))
 		return -1;
 
 	if(mtk_ioctl(ifname, SIOCGIWRATE, &wrq) >= 0)
 	{
-		*buf = (wrq.u.bitrate.value / 1000);
+		bitrate = wrq.u.bitrate.value;
+		eht320 = mtk_is_eht320(dev);
+
+		if (eht320 &&
+		    bitrate >= 500000000ULL && bitrate <= 530000000ULL)
+			bitrate = 8647000000ULL;
+
+		*buf = (bitrate / 1000);
 		return 0;
 	}
 
@@ -174,10 +572,9 @@ static int mtk_get_bitrate(const char *dev, int *buf)
 static int mtk_get_channel(const char *dev, int *buf)
 {
 	struct iwreq wrq;
-	const char *ifname;
+	char ifname[IFNAMSIZ];
 
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
+	if (mtk_dev2phy(dev, ifname))
 		return -1;
 
 	if (mtk_ioctl(ifname, SIOCGIWFREQ, &wrq) >= 0)
@@ -203,12 +600,16 @@ static int mtk_get_center_chan2(const char *dev, int *buf)
 
 static int mtk_get_frequency(const char *dev, int *buf)
 {
+	char chans[IWINFO_BUFSIZE] = { 0 };
+	struct iwinfo_freqlist_entry *entry;
 	int channel;
+	int band;
+	int len = 0;
+	size_t offset;
 	struct iwreq wrq;
-	const char *ifname;
+	char ifname[IFNAMSIZ];
 
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
+	if (mtk_dev2phy(dev, ifname))
 		return -1;
 
 	if (mtk_ioctl(ifname, SIOCGIWFREQ, &wrq) >= 0)
@@ -218,31 +619,38 @@ static int mtk_get_frequency(const char *dev, int *buf)
 		if (channel <= 0)
 			return -1;
 
-		if (channel > 14) {
-			if (channel >= 182 && channel <= 196)
-				*buf = 4000 + channel * 5;
-			else
-				*buf = 5000 + channel * 5;
-		} else if (channel == 14) {
-			*buf = 2484;
-		} else {
-			*buf = 2407 + channel * 5;
+		if (!mtk_get_band(dev, &band)) {
+			*buf = mtk_channel_to_frequency(channel, band);
+			return (*buf > 0) ? 0 : -1;
 		}
 
-		return 0;
+		if (!mtk_get_freqlist(dev, chans, &len)) {
+			for (offset = 0;
+			     offset + sizeof(*entry) <= (size_t)len;
+			     offset += sizeof(*entry)) {
+				entry = (struct iwinfo_freqlist_entry *)
+					&chans[offset];
+
+				if (entry->channel == channel) {
+					*buf = entry->mhz;
+					return 0;
+				}
+			}
+		}
+
+		*buf = mtk_channel_to_frequency(channel, -1);
+		return (*buf > 0) ? 0 : -1;
 	}
 
 	return -1;
-	
 }
 
 static int mtk_get_txpower(const char *dev, int *buf)
 {
 	struct iwreq wrq;
-	const char *ifname;
+	char ifname[IFNAMSIZ];
 
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
+	if (mtk_dev2phy(dev, ifname))
 		return -1;
 
 	wrq.u.txpower.flags = 0;
@@ -368,69 +776,97 @@ static void mtk_parse_rateinfo(RT_802_11_MAC_ENTRY *pe,
 	TxRate.word = pe->TxRate.word;
 	RxRate.word = pe->LastRxRate.word;
 
-	mcs = TxRate.field.MCS;
-	mcs_r = RxRate.field.MCS;
+	if (TxRate.field.MODE != MODE_UNKNOWN) {
+		mcs = TxRate.field.MCS;
 
-	if (TxRate.field.MODE >= MODE_VHT) {
-		nss = ((mcs & (0x3 << 4)) >> 4) + 1;
-		mcs = mcs & 0xF;
-		tx_rate->nss = nss;
-	} else {
-		mcs = mcs & 0x3f;
-		tx_rate->nss = 1;
-	}
-	tx_rate->mcs = mcs;
-
-	if (RxRate.field.MODE == MODE_UNKNOWN) {
-		mcs_r = mcs_r;
-	} else if (RxRate.field.MODE >= MODE_VHT) {
-		nss_r = (((mcs_r & (0x3 << 4)) >> 4) + 1) / (RxRate.field.STBC + 1);
-		mcs_r = mcs_r & 0xF;
-		rx_rate->nss = nss_r;
-	} else {
-		rx_rate->nss = 1;
-		if (RxRate.field.MODE >= MODE_HTMIX) {
-			mcs_r = mcs_r & 0x3f;
-		} else if (RxRate.field.MODE == MODE_OFDM) {
-			mcs_r = mcs_r & 0xf;
-			RxRate.field.MCS = mcs_r;
-		} else if (RxRate.field.MODE == MODE_CCK) {
-			mcs_r = cck_to_mcs(mcs_r & 0x7);
-			RxRate.field.MCS = mcs_r;
+		if (TxRate.field.MODE >= MODE_VHT) {
+			nss = ((mcs & (0x3 << 4)) >> 4) + 1;
+			mcs = mcs & 0xF;
+			tx_rate->nss = nss;
+		} else {
+			mcs = mcs & 0x3f;
+			tx_rate->nss = 1;
 		}
-	}
-	rx_rate->mcs = mcs_r;
 
-	fill_rate_info(TxRate, tx_rate, mcs, nss);
-	fill_rate_info(RxRate, rx_rate, mcs_r, nss_r);
+		tx_rate->mcs = mcs;
+		fill_rate_info(TxRate, tx_rate, mcs, nss);
+	}
+
+	if (RxRate.field.MODE != MODE_UNKNOWN) {
+		mcs_r = RxRate.field.MCS;
+
+		if (RxRate.field.MODE >= MODE_VHT) {
+			nss_r = (((mcs_r & (0x3 << 4)) >> 4) + 1) /
+				(RxRate.field.STBC + 1);
+			mcs_r = mcs_r & 0xF;
+			rx_rate->nss = nss_r;
+		} else {
+			rx_rate->nss = 1;
+			if (RxRate.field.MODE >= MODE_HTMIX) {
+				mcs_r = mcs_r & 0x3f;
+			} else if (RxRate.field.MODE == MODE_OFDM) {
+				mcs_r = mcs_r & 0xf;
+				RxRate.field.MCS = mcs_r;
+			} else if (RxRate.field.MODE == MODE_CCK) {
+				mcs_r = cck_to_mcs(mcs_r & 0x7);
+				RxRate.field.MCS = mcs_r;
+			}
+		}
+
+		rx_rate->mcs = mcs_r;
+		fill_rate_info(RxRate, rx_rate, mcs_r, nss_r);
+	}
 }
 
-static int mtk_get_assoclist(const char *dev, char *buf, int *len)
+static RT_802_11_MAC_TABLE *mtk_get_mac_table(const char *dev)
 {
 	struct iwreq wrq = {};
 	RT_802_11_MAC_TABLE *table;
-	int i;
-	const char *ifname;
+	char ifname[IFNAMSIZ];
 
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
-		return -1;
+	if (mtk_dev2phy(dev, ifname))
+		return NULL;
 
 	table = calloc(1, sizeof(RT_802_11_MAC_TABLE));
 	if (!table)
-		return -1;
+		return NULL;
 
 	wrq.u.data.pointer = (caddr_t)table;
 	wrq.u.data.length  = sizeof(RT_802_11_MAC_TABLE);
 
 	if (mtk_ioctl(ifname, RTPRIV_IOCTL_GET_MAC_TABLE_STRUCT, &wrq) < 0) {
 		free(table);
-		return -1;
+		return NULL;
 	}
 
-	*len = 0;
+	return table;
+}
 
-	for (i = 0; i < table->Num; i++) {
+static size_t mtk_mac_table_count(const RT_802_11_MAC_TABLE *table)
+{
+	if (table->Num > MAX_NUMBER_OF_MAC)
+		return MAX_NUMBER_OF_MAC;
+
+	return table->Num;
+}
+
+static int mtk_get_assoclist(const char *dev, char *buf, int *len)
+{
+	RT_802_11_MAC_TABLE *table;
+	size_t count;
+	size_t max_entries;
+	size_t i;
+
+	table = mtk_get_mac_table(dev);
+	if (!table)
+		return -1;
+
+	count = mtk_mac_table_count(table);
+	max_entries = IWINFO_BUFSIZE / sizeof(struct iwinfo_assoclist_entry);
+	if (count > max_entries)
+		count = max_entries;
+
+	for (i = 0; i < count; i++) {
 		RT_802_11_MAC_ENTRY *pe = &(table->Entry[i]);
 		struct iwinfo_assoclist_entry *e = (struct iwinfo_assoclist_entry *)buf + i;
 
@@ -445,11 +881,42 @@ static int mtk_get_assoclist(const char *dev, char *buf, int *len)
 		e->rx_bytes = pe->RxBytes;
 		e->tx_bytes = pe->TxBytes;
 		mtk_parse_rateinfo(pe, &e->rx_rate, &e->tx_rate);
+	}
 
-		*len += sizeof(struct iwinfo_assoclist_entry);
+	*len = count * sizeof(struct iwinfo_assoclist_entry);
+	free(table);
+	return 0;
+}
+
+static int mtk_get_assoc_bitrate(const char *dev, int *buf)
+{
+	RT_802_11_MAC_TABLE *table;
+	struct iwinfo_rate_entry rx_rate;
+	struct iwinfo_rate_entry tx_rate;
+	uint32_t best = 0;
+	size_t count;
+	size_t i;
+
+	table = mtk_get_mac_table(dev);
+	if (!table)
+		return -1;
+
+	count = mtk_mac_table_count(table);
+	for (i = 0; i < count; i++) {
+		mtk_parse_rateinfo(&table->Entry[i], &rx_rate, &tx_rate);
+
+		if (tx_rate.rate > best)
+			best = tx_rate.rate;
+		if (rx_rate.rate > best)
+			best = rx_rate.rate;
 	}
 
 	free(table);
+
+	if (!best)
+		return -1;
+
+	*buf = best;
 	return 0;
 }
 
@@ -493,10 +960,9 @@ static int mtk_get_scanlist(const char *dev, char *buf, int *len)
 	int index = 0;
 	int total = -1;
 	char *pos;
-	const char *ifname;
+	char ifname[IFNAMSIZ];
 
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
+	if (mtk_dev2phy(dev, ifname))
 		return -1;
 
 	*len = 0;
@@ -629,14 +1095,15 @@ static int mtk_get_scanlist(const char *dev, char *buf, int *len)
 
 static int mtk_get_freqlist(const char *dev, char *buf, int *len)
 {
+	int device_band = -1;
 	struct iwreq wrq;
 	struct iw_range range;
 	struct iwinfo_freqlist_entry entry;
-	const char* ifname;
+	char ifname[IFNAMSIZ];
+	int band;
 	int i, bl;
 
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
+	if (mtk_dev2phy(dev, ifname))
 		return -1;
 
 	if (!mtk_is_ifup(ifname))
@@ -649,12 +1116,23 @@ static int mtk_get_freqlist(const char *dev, char *buf, int *len)
 	if (mtk_ioctl(ifname, SIOCGIWRANGE, &wrq) >= 0)
 	{
 		bl = 0;
+		mtk_get_band(dev, &device_band);
 
 		for (i = 0; i < range.num_frequency; i++)
 		{
+			memset(&entry, 0, sizeof(entry));
 			entry.mhz        = range.freq[i].m;
 			entry.channel    = range.freq[i].i;
 			entry.restricted = 0;
+
+			if (device_band >= 0)
+				band = mtk_iwinfo_band(device_band);
+			else
+				band = mtk_iwinfo_band(
+					mtk_band_from_frequency(entry.mhz));
+
+			if (band)
+				entry.band = band;
 
 			memcpy(&buf[bl], &entry, sizeof(struct iwinfo_freqlist_entry));
 			bl += sizeof(struct iwinfo_freqlist_entry);
@@ -669,12 +1147,11 @@ static int mtk_get_freqlist(const char *dev, char *buf, int *len)
 
 static int mtk_get_country(const char *dev, char *buf)
 {
-	const char *ifname;
+	char ifname[IFNAMSIZ];
 	char data[4] = {0};
 	struct iwreq wrq;
 
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
+	if (mtk_dev2phy(dev, ifname))
 		return -1;
 
 	wrq.u.data.length = sizeof(data);
@@ -706,53 +1183,33 @@ static int mtk_get_countrylist(const char *dev, char *buf, int *len)
 
 static int mtk_get_hwmodelist(const char *dev, int *buf)
 {
-	const char *ifname;
 	char chans[IWINFO_BUFSIZE] = { 0 };
 	struct iwinfo_freqlist_entry *e = NULL;
-	struct uci_section *s;
-	const char* band = NULL;
+	int band;
 	int len = 0;
+	size_t offset;
+	unsigned long wmode = 0;
 
 	*buf = 0;
+	mtk_get_phy_mode(dev, &wmode);
 
-	/* get hwmode base on uci band config */
-	s = iwinfo_uci_get_radio(dev, "mtwifi");
-	if (!s)
-		goto uciout;
-	
-	band = uci_lookup_option_string(uci_ctx, s, "band");
-
-uciout:
-	iwinfo_uci_free();
-
-	if (band) {
-		if (!strcmp(band,"2g"))
-			*buf = (IWINFO_80211_N | IWINFO_80211_AX | IWINFO_80211_BE);
-		else if (!strcmp(band,"5g"))
-			*buf = (IWINFO_80211_AC | IWINFO_80211_AX | IWINFO_80211_BE);
+	if (!mtk_get_band(dev, &band)) {
+		mtk_set_hwmodelist_for_band(band, wmode, buf);
 		return 0;
 	}
 
-	/* get hwmode base on iwrange */
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
-		return -1;
-
-	if (!mtk_get_freqlist(ifname, chans, &len))
+	if (!mtk_get_freqlist(dev, chans, &len))
 	{
-		for (e = (struct iwinfo_freqlist_entry *)chans; e->channel; e++ )
-		{
-			if (e->channel <= 14 ) //2.4Ghz
-			{
-				*buf = (IWINFO_80211_N | IWINFO_80211_AX | IWINFO_80211_BE);
-			}
-			else //5Ghz
-			{
-				*buf = (IWINFO_80211_AC | IWINFO_80211_AX | IWINFO_80211_BE);
+		for (offset = 0;
+		     offset + sizeof(*e) <= (size_t)len;
+		     offset += sizeof(*e)) {
+			e = (struct iwinfo_freqlist_entry *)&chans[offset];
+			band = mtk_band_from_frequency(e->mhz);
+			if (band >= 0) {
+				mtk_set_hwmodelist_for_band(band, wmode, buf);
+				return 0;
 			}
 		}
-
-		return 0;
 	}
 
 	return -1;
@@ -760,57 +1217,33 @@ uciout:
 
 static int mtk_get_htmodelist(const char *dev, int *buf)
 {
-	const char *ifname;
 	char chans[IWINFO_BUFSIZE] = { 0 };
 	struct iwinfo_freqlist_entry *e = NULL;
-	struct uci_section *s;
-	const char* band = NULL;
+	int band;
 	int len = 0;
+	size_t offset;
+	unsigned long wmode = 0;
 
 	*buf = 0;
+	mtk_get_phy_mode(dev, &wmode);
 
-	/* get htmode base on uci band config */
-	s = iwinfo_uci_get_radio(dev, "mtwifi");
-	if (!s)
-		goto uciout;
-	
-	band = uci_lookup_option_string(uci_ctx, s, "band");
-
-uciout:
-	iwinfo_uci_free();
-
-	if (band) {
-		if (!strcmp(band,"2g"))
-			*buf = (IWINFO_HTMODE_HT20 | IWINFO_HTMODE_HT40 | IWINFO_HTMODE_HE20 | IWINFO_HTMODE_HE40 | IWINFO_HTMODE_EHT20 | IWINFO_HTMODE_EHT40);
-		else if (!strcmp(band,"5g"))
-			*buf = (IWINFO_HTMODE_VHT20 | IWINFO_HTMODE_VHT40 | IWINFO_HTMODE_VHT80 | IWINFO_HTMODE_VHT160
-			| IWINFO_HTMODE_HE20 | IWINFO_HTMODE_HE40 | IWINFO_HTMODE_HE80 | IWINFO_HTMODE_HE160
-			| IWINFO_HTMODE_EHT20 | IWINFO_HTMODE_EHT40 | IWINFO_HTMODE_EHT80 | IWINFO_HTMODE_EHT160);
+	if (!mtk_get_band(dev, &band)) {
+		mtk_set_htmodelist_for_band(band, wmode, buf);
 		return 0;
 	}
 
-	/* get htmode base on iwrange */
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
-		return -1;
-
-	if (!mtk_get_freqlist(ifname, chans, &len))
+	if (!mtk_get_freqlist(dev, chans, &len))
 	{
-		for (e = (struct iwinfo_freqlist_entry *)chans; e->channel; e++ )
-		{
-			if (e->channel <= 14 ) //2.4Ghz
-			{
-				*buf = (IWINFO_HTMODE_HT20 | IWINFO_HTMODE_HT40 | IWINFO_HTMODE_HE20 | IWINFO_HTMODE_HE40 | IWINFO_HTMODE_EHT20 | IWINFO_HTMODE_EHT40);
-			}
-			else //5Ghz
-			{
-				*buf = (IWINFO_HTMODE_VHT20 | IWINFO_HTMODE_VHT40 | IWINFO_HTMODE_VHT80 | IWINFO_HTMODE_VHT160
-				| IWINFO_HTMODE_HE20 | IWINFO_HTMODE_HE40 | IWINFO_HTMODE_HE80 | IWINFO_HTMODE_HE160
-				| IWINFO_HTMODE_EHT20 | IWINFO_HTMODE_EHT40 | IWINFO_HTMODE_EHT80 | IWINFO_HTMODE_EHT160);
+		for (offset = 0;
+		     offset + sizeof(*e) <= (size_t)len;
+		     offset += sizeof(*e)) {
+			e = (struct iwinfo_freqlist_entry *)&chans[offset];
+			band = mtk_band_from_frequency(e->mhz);
+			if (band >= 0) {
+				mtk_set_htmodelist_for_band(band, wmode, buf);
+				return 0;
 			}
 		}
-
-		return 0;
 	}
 
 	return -1;
@@ -818,13 +1251,12 @@ uciout:
 
 static int mtk_get_htmode(const char *dev, int *buf)
 {
-	const char *ifname;
+	char ifname[IFNAMSIZ];
 	struct iwreq wrq;
 	unsigned char bw = 0;
 	unsigned long wmode = 0;
 
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
+	if (mtk_dev2phy(dev, ifname))
 		return -1;
 
 	if (!mtk_is_ifup(ifname))
@@ -884,14 +1316,13 @@ static int mtk_get_htmode(const char *dev, int *buf)
 
 static int mtk_get_encryption(const char *dev, char *buf)
 {
-	const char *ifname;
+	char ifname[IFNAMSIZ];
 	struct iwreq wrq;
 	struct security_info secinfo;
 	unsigned int authMode, encryMode;
 	struct iwinfo_crypto_entry *c = (struct iwinfo_crypto_entry *)buf;
 
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
+	if (mtk_dev2phy(dev, ifname))
 		return -1;
 
 	if (!mtk_is_ifup(ifname))
@@ -975,10 +1406,9 @@ static int mtk_get_encryption(const char *dev, char *buf)
 
 static int mtk_get_phyname(const char *dev, char *buf)
 {
-	const char *ifname;
+	char ifname[IFNAMSIZ];
 
-	ifname = mtk_dev2phy(dev);
-	if (!ifname)
+	if (mtk_dev2phy(dev, ifname))
 		return -1;
 
 	strcpy(buf, ifname);

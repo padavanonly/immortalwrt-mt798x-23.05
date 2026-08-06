@@ -1,36 +1,21 @@
-From: Petr Wozniak <petr.wozniak@gmail.com>
+From: medyma <aneylovemzy@gmail.com>
 Date: Sun, 06 Jul 2026 16:00:00 +0200
-Subject: [PATCH 6.6] net: pcs: mtk-lynxi: don't report link up with
- unresolved speed in get_state
+Subject: [PATCH 6.6] net: pcs: mtk-lynxi: hold link down on unresolved speed
 
-The non-autoneg path in mtk_pcs_lynxi_get_state() sets state->link from
-BMSR_LSTATUS before decoding the SGMII speed field from SGMSYS_SGMII_MODE.
-During a 10GBASE-R -> 1000BASE-X (XGDM->GDM) mode transition, typical on
-warm reboot with a copper SFP+ module, the speed field briefly reads a
-reserved value, leaving state->speed at SPEED_UNKNOWN while state->link is
-already true.
+mtk_pcs_lynxi_get_state() reports link up before the SGMII speed field
+is decoded; during a 10GBASE-R -> 1000BASE-X transition the speed reads a
+reserved value and the MAC comes up with SPEED_UNKNOWN, wedging the GMAC
+Rx path. Keep the link down until the speed is known.
 
-phylink reports "Link is Up - Unsupported/Half" and brings the MAC up with
-no valid speed configured.  On MediaTek GMAC the Rx FSM wedges ("GMAC Rx
-hang"), recoverable only by cold reboot.
-
-Add a default case to the speed-decode switch that forces link down when
-the speed field is an unrecognized value, so phylink re-polls until the
-speed resolves.  This is the 6.6 equivalent of the 6.7+ link_poll guard
-(commit 7dfffc16b710, "net: pcs: mtk-lynxi: add link_poll mechanism").
-
-Note: targets padavanonly's 6.6 kernel with existing PCS patches
-(999-2601, 999-2605) already applied.
-
-Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
+Signed-off-by: medyma <aneylovemzy@gmail.com>
 ---
  drivers/net/pcs/pcs-mtk-lynxi.c | 7 +++++++
  1 file changed, 7 insertions(+)
 
 --- a/drivers/net/pcs/pcs-mtk-lynxi.c
 +++ b/drivers/net/pcs/pcs-mtk-lynxi.c
-@@ -171,6 +171,13 @@ static void mtk_pcs_lynxi_get_state(stru
- 			rgc3 &= SGMII_PHY_SPEED_MASK;
+@@ -140,6 +140,13 @@
+ 		case SGMII_SPEED_1000:
  			state->speed = (rgc3 == SGMII_PHY_SPEED_3_125G) ? SPEED_2500 : SPEED_1000;
  			break;
 +		default:

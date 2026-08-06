@@ -1,0 +1,259 @@
+From: medyma <aneylovemzy@gmail.com>
+Date: Wed, 5 Aug 2026 23:16:00 +0800
+Subject: [PATCH 6.6 v8] net: sfp: opt in to warm-reboot recovery
+
+Some modules stay powered across a warm reboot but stop answering I2C.
+The warm-boot-recovery DT property opts a cage in: wait up to 10x300ms for
+passive EEPROM readiness, then optionally power-cycle, pulse TX_DISABLE
+(hold then release before I2C recovery), and retry. Enabled only on affected
+BPI-R4 cages.
+
+Signed-off-by: medyma <aneylovemzy@gmail.com>
+---
+ Documentation/devicetree/bindings/net/sff,sfp.yaml |  14 ++
+ .../dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dts   |   2 +
+ .../boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dts  |   5 +
+ drivers/net/phy/sfp.c                                              | 156 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 177 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/net/sff,sfp.yaml b/Documentation/devicetree/bindings/net/sff,sfp.yaml
+--- a/Documentation/devicetree/bindings/net/sff,sfp.yaml
++++ b/Documentation/devicetree/bindings/net/sff,sfp.yaml
+@@ -54,6 +54,20 @@ properties:
+       GPIO phandle and a specifier of the Transmitter Disable output gpio
+       signal, active (Tx disable) high
+ 
++  power-gpios:
++    maxItems: 1
++    description:
++      GPIO phandle and a specifier of the module power output gpio. The active
++      state powers the module.
++
++  warm-boot-recovery:
++    type: boolean
++    description:
++      Enable disruptive startup recovery only for SFP cages affected by modules
++      whose EEPROM can remain unavailable after a warm reboot. When a module is
++      present, the driver waits for passive EEPROM readiness before attempting
++      an optional power cycle, a TX_DISABLE pulse, or I2C bus recovery.
++
+   "rate-select0-gpios":
+     maxItems: 1
+     description:
+diff --git a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dts b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dts
+--- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dts
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4-pro.dts
+@@ -102,6 +102,7 @@
+ 		mod-def0-gpios = <&pio 4 GPIO_ACTIVE_LOW>;
+ 		tx-disable-gpios = <&pio 21 GPIO_ACTIVE_HIGH>;
+ 		maximum-power-milliwatt = <3000>;
++		warm-boot-recovery;
+ 	};
+ 
+ 	/* SFP2 cage (WAN) */
+@@ -112,6 +113,7 @@
+ 		mod-def0-gpios = <&pio 1 GPIO_ACTIVE_LOW>;
+ 		tx-disable-gpios = <&pio 0 GPIO_ACTIVE_HIGH>;
+ 		maximum-power-milliwatt = <3000>;
++		warm-boot-recovery;
+ 	};
+ };
+ 
+diff --git a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dts b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dts
+--- a/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dts
++++ b/arch/arm64/boot/dts/mediatek/mt7988a-bananapi-bpi-r4.dts
+@@ -21,11 +21,16 @@
+ 		tx-fault-gpios = <&pio 1 GPIO_ACTIVE_HIGH>;
+ 		rate-select0-gpios = <&pio 3 GPIO_ACTIVE_LOW>;
+ 		maximum-power-milliwatt = <3000>;
++		warm-boot-recovery;
+ 	};
+ };
+ 
++&sfp1 {
++	warm-boot-recovery;
++};
++
+ &gmac1 {
+ 	sfp = <&sfp2>;
+ 	managed = "in-band-status";
+ 	phy-mode = "usxgmii";
+ 	status = "okay";
+diff --git a/drivers/net/phy/sfp.c b/drivers/net/phy/sfp.c
+--- a/drivers/net/phy/sfp.c
++++ b/drivers/net/phy/sfp.c
+@@ -3219,11 +3219,158 @@ put:
+ 	return err;
+ }
+ 
++#define SFP_WARM_BOOT_READY_MS	300
++#define SFP_WARM_BOOT_READY_RETRIES	10
++#define SFP_WARM_BOOT_RETRIES	5
++#define SFP_WARM_BOOT_PULSE_MS	100
++#define SFP_WARM_BOOT_SETTLE_MS	500
++#define SFP_WARM_BOOT_POWER_OFF_MS	500
++#define SFP_WARM_BOOT_POWER_ON_MS	1500
++
++static int sfp_warm_boot_read_eeprom(struct sfp *sfp)
++{
++	u8 phys_id;
++	int ret;
++
++	ret = sfp_read(sfp, false, 0, &phys_id, sizeof(phys_id));
++	if (ret == sizeof(phys_id))
++		return 0;
++
++	return ret < 0 ? ret : -EIO;
++}
++
++static int sfp_warm_boot_wait_for_eeprom(struct sfp *sfp)
++{
++	int ret, retry;
++
++	/* Try immediately: most modules answer right away after a warm
++	 * reboot. Only enter the SFF-8472 readiness grace (300ms intervals)
++	 * when the first read fails, so healthy modules are not delayed. */
++	ret = sfp_warm_boot_read_eeprom(sfp);
++	if (!ret)
++		return 0;
++
++	for (retry = 0; retry < SFP_WARM_BOOT_READY_RETRIES; retry++) {
++		msleep(SFP_WARM_BOOT_READY_MS);
++		ret = sfp_warm_boot_read_eeprom(sfp);
++		if (!ret)
++			return 0;
++	}
++
++	return ret;
++}
++
++static int sfp_i2c_recover_bus(struct sfp *sfp)
++{
++	struct i2c_adapter *adap = sfp->i2c;
++	int ret = -EBUSY;
++
++	while (adap) {
++		ret = i2c_recover_bus(adap);
++		if (ret != -EBUSY)
++			break;
++		adap = i2c_parent_is_i2c_adapter(adap);
++	}
++
++	if (ret == -EBUSY) {
++		dev_dbg(sfp->dev, "warm boot: no I2C bus recovery support\n");
++		return -EOPNOTSUPP;
++	}
++
++	return ret;
++}
++
++static void sfp_warm_boot_power_cycle(struct gpio_desc *power)
++{
++	gpiod_set_value_cansleep(power, 0);
++	msleep(SFP_WARM_BOOT_POWER_OFF_MS);
++	gpiod_set_value_cansleep(power, 1);
++	msleep(SFP_WARM_BOOT_POWER_ON_MS);
++}
++
++static int sfp_warm_boot_recover(struct sfp *sfp)
++{
++	struct gpio_desc *power;
++	int recover_ret, retry, ret;
++
++	if (!(sfp->state & SFP_F_PRESENT))
++		return 0;
++
++	ret = sfp_warm_boot_wait_for_eeprom(sfp);
++	if (!ret)
++		return 0;
++
++	power = devm_gpiod_get_optional(sfp->dev, "power", GPIOD_OUT_HIGH);
++	if (IS_ERR(power)) {
++		ret = PTR_ERR(power);
++		if (ret == -EPROBE_DEFER)
++			return ret;
++		dev_warn(sfp->dev,
++			 "warm boot: power GPIO unavailable: %d\n", ret);
++		power = NULL;
++	}
++
++	dev_warn(sfp->dev,
++		 "warm boot: EEPROM unavailable after passive readiness; attempting recovery\n");
++
++	if (power) {
++		sfp_warm_boot_power_cycle(power);
++		ret = sfp_warm_boot_read_eeprom(sfp);
++		if (!ret) {
++			dev_info(sfp->dev,
++				 "warm boot: module recovered after power cycle\n");
++			return 0;
++		}
++	}
++
++	for (retry = 0; retry < SFP_WARM_BOOT_RETRIES; retry++) {
++		if (sfp->gpio[GPIO_TX_DISABLE]) {
++			/* Hold TX_DISABLE asserted, then release: several GPON
++			 * modules reset their management firmware on the deassert
++			 * edge after a sustained disable, re-initialising the
++			 * EEPROM interface. */
++			gpiod_set_value_cansleep(sfp->gpio[GPIO_TX_DISABLE], 1);
++			msleep(SFP_WARM_BOOT_PULSE_MS);
++			gpiod_set_value_cansleep(sfp->gpio[GPIO_TX_DISABLE], 0);
++		}
++
++		if (sfp->i2c) {
++			i2c_lock_bus(sfp->i2c, I2C_LOCK_SEGMENT);
++			recover_ret = sfp_i2c_recover_bus(sfp);
++			i2c_unlock_bus(sfp->i2c, I2C_LOCK_SEGMENT);
++		} else {
++			recover_ret = -ENODEV;
++		}
++
++		if (recover_ret)
++			dev_dbg(sfp->dev,
++				"warm boot: I2C recovery failed: %d\n",
++				recover_ret);
++
++		/* Keep the cached output state and physical pin safely disabled. */
++		sfp_module_tx_disable(sfp);
++		msleep(SFP_WARM_BOOT_SETTLE_MS);
++
++		ret = sfp_warm_boot_read_eeprom(sfp);
++		if (!ret) {
++			dev_info(sfp->dev, "warm boot: module EEPROM recovered\n");
++			return 0;
++		}
++	}
++
++	dev_err(sfp->dev,
++		"warm boot: module EEPROM unavailable after %d attempts: %d\n",
++		SFP_WARM_BOOT_RETRIES, ret);
++
++	return 0;
++}
++
+ static int sfp_probe(struct platform_device *pdev)
+ {
+ 	const struct sff_data *sff;
+ 	char *sfp_irq_name;
+ 	struct sfp *sfp;
++	unsigned int state;
+ 	int err, i;
+ 
+ 	sfp = sfp_alloc(&pdev->dev);
+@@ -3286,6 +3431,15 @@ static int sfp_probe(struct platform_device *pdev)
+ 		sfp->state |= SFP_F_RS0;
+ 	sfp_set_state(sfp, sfp->state);
+ 	sfp_module_tx_disable(sfp);
++	if ((sfp->state & SFP_F_PRESENT) &&
++	    device_property_read_bool(sfp->dev,
++				      "warm-boot-recovery")) {
++		err = sfp_warm_boot_recover(sfp);
++		if (err)
++			return err;
++		state = sfp_get_state(sfp);
++		sfp->state = state | (sfp->state & SFP_F_OUTPUTS);
++	}
+ 	if (sfp->state & SFP_F_PRESENT) {
+ 		rtnl_lock();
+ 		sfp_sm_event(sfp, SFP_E_INSERT);

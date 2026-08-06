@@ -1,0 +1,107 @@
+From: medyma <aneylovemzy@gmail.com>
+Date: Thu, 6 Aug 2026 21:00:00 +0800
+Subject: [PATCH 6.6] i2c: mux: add bus recovery via the pca954x RESET pin
+
+The PCA9545 RESET pin deselects all channels and releases a downstream
+I2C bus stuck in a low state - exactly what the SFP warm-boot recovery
+needs. Store the mux core as the child adapter driver data so the pca954x
+driver can reach it from a recover_bus callback, and expose the reset
+pulse as bus recovery on every mux child adapter. i2c_recover_bus() from
+the SFP driver then pulses RESET instead of being a no-op on MTK I2C.
+
+Signed-off-by: medyma <aneylovemzy@gmail.com>
+---
+ drivers/i2c/i2c-mux.c                | 1 ++
+ drivers/i2c/muxes/i2c-mux-pca954x.c | 30 +++++++++++++++++++++++++++++++
+ 2 files changed, 31 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/i2c/i2c-mux.c b/drivers/i2c/i2c-mux.c
+index 57ff09f..09d57e2 100644
+--- a/drivers/i2c/i2c-mux.c
++++ b/drivers/i2c/i2c-mux.c
+@@ -332,6 +332,7 @@ int i2c_mux_add_adapter(struct i2c_mux_core *muxc,
+ 	priv->adap.algo = &priv->algo;
+ 	priv->adap.algo_data = priv;
+ 	priv->adap.dev.parent = &parent->dev;
++	dev_set_drvdata(&priv->adap.dev, muxc);
+ 	priv->adap.retries = parent->retries;
+ 	priv->adap.timeout = parent->timeout;
+ 	priv->adap.quirks = parent->quirks;
+diff --git a/drivers/i2c/muxes/i2c-mux-pca954x.c b/drivers/i2c/muxes/i2c-mux-pca954x.c
+index 2219062..5abc567 100644
+--- a/drivers/i2c/muxes/i2c-mux-pca954x.c
++++ b/drivers/i2c/muxes/i2c-mux-pca954x.c
+@@ -102,6 +102,7 @@ struct pca954x {
+ 	unsigned int irq_mask;
+ 	raw_spinlock_t lock;
+ 	struct regulator *supply;
++	struct gpio_desc *reset;
+ };
+ 
+ /* Provide specs for the MAX735x, PCA954x and PCA984x types we know about */
+@@ -338,6 +339,29 @@ static int pca954x_deselect_mux(struct i2c_mux_core *muxc, u32 chan)
+ 	return 0;
+ }
+ 
++static int pca954x_recover_bus(struct i2c_adapter *adap)
++{
++	struct i2c_mux_core *muxc = dev_get_drvdata(&adap->dev);
++	struct pca954x *data = muxc ? i2c_mux_priv(muxc) : NULL;
++
++	if (!data || !data->reset)
++		return -EOPNOTSUPP;
++
++	/* Assert RESET (active low): deselect all channels and release a
++	 * downstream bus stuck in a low state, per the PCA9545 reset
++	 * semantics. */
++	gpiod_set_value_cansleep(data->reset, 0);
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(data->reset, 1);
++	usleep_range(1000, 2000);
++
++	return 0;
++}
++
++static const struct i2c_bus_recovery_info pca954x_bus_recovery = {
++	.recover_bus = pca954x_recover_bus,
++};
++
+ static ssize_t idle_state_show(struct device *dev,
+ 				    struct device_attribute *attr,
+ 				    char *buf)
+@@ -485,7 +509,6 @@ static int pca954x_probe(struct i2c_client *client)
+ 	const struct i2c_device_id *id = i2c_client_get_device_id(client);
+ 	struct i2c_adapter *adap = client->adapter;
+ 	struct device *dev = &client->dev;
+-	struct gpio_desc *gpio;
+ 	struct i2c_mux_core *muxc;
+ 	struct pca954x *data;
+ 	int num;
+@@ -514,14 +537,14 @@ static int pca954x_probe(struct i2c_client *client)
+ 				     "Failed to enable vdd supply\n");
+ 
+ 	/* Reset the mux if a reset GPIO is specified. */
+-	gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
+-	if (IS_ERR(gpio)) {
+-		ret = PTR_ERR(gpio);
++	data->reset = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(data->reset)) {
++		ret = PTR_ERR(data->reset);
+ 		goto fail_cleanup;
+ 	}
+-	if (gpio) {
++	if (data->reset) {
+ 		udelay(1);
+-		gpiod_set_value_cansleep(gpio, 0);
++		gpiod_set_value_cansleep(data->reset, 0);
+ 		/* Give the chip some time to recover. */
+ 		udelay(1);
+ 	}
+@@ -576,6 +599,7 @@ static int pca954x_probe(struct i2c_client *client)
+ 		ret = i2c_mux_add_adapter(muxc, 0, num, 0);
+ 		if (ret)
+ 			goto fail_cleanup;
++		muxc->adapter[num]->bus_recovery_info = &pca954x_bus_recovery;
+ 	}
+ 
+ 	if (data->irq) {

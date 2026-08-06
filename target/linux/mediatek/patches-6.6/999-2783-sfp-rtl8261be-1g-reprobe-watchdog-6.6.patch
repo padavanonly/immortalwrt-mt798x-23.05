@@ -1,57 +1,23 @@
-From: Petr Wozniak <petr.wozniak@gmail.com>
+From: medyma <aneylovemzy@gmail.com>
 Date: Thu, 22 May 2026 14:00:00 +0200
-Subject: [PATCH 6.6] net: sfp: add 1G multi-speed reprobe watchdog for
- RTL8261BE
+Subject: [PATCH 6.6] net: sfp: add 1G reprobe watchdog for media converters
 
-Some active copper SFP+ modules (e.g. RTL8261BE-based) advertise
-10GBASE-T at power-on and only switch to 1000BASE-T once they have
-locked a 1G link partner.  If the host probed them while they still
-advertised 10G, the MAC stays stuck on 10GBASE-R and never links.
+Copper modules may advertise 10G at power-on and only switch to 1G after
+locking a link partner. For modules confirmed by 2782 to have no RollBall
+bridge, re-read the module when the link is not stable within 60s (5
+attempts). The worker holds rtnl_lock then sm_mutex and replays
+REMOVE/INSERT in one critical section.
 
-Add a reprobe watchdog to the SFP state machine:
-
-- When entering SFP_S_LINK_UP, change the timeout from 0 (indefinite)
-  to T_LINK_STABLE (5 seconds).  The link-up event is reported to
-  phylink/MAC immediately via sfp_link_up(); the timeout only controls
-  when the watchdog considers the link "stable" and stops monitoring.
-
-- The watchdog is armed ONLY for copper SFP+ modules (connector type
-  SFF8024_CONNECTOR_RJ45), detected via sm_reprobe_enabled flag set
-  during module probe.  GPON, fiber, and unpopulated slots are
-  completely unaffected.
-
-- When armed: a T_LINK_FAIL (60s) timer fires if the link does not
-  become stable within 60 seconds, triggering a simulated
-  remove/insert cycle to re-read the module advertisement.
-  The 60s threshold is conservative to avoid interrupting slow-to-link
-  GPON/ONU modules (which are excluded by the connector check anyway).
-
-- Bounded by R_REPROBE (5) attempts.  Worst-case retry window is
-  5 x 60s = 5 minutes.
-
-- The reprobe is guarded by sm_reprobing to prevent the REMOVE event
-  handler from cancelling the reprobe work during the simulated cycle.
-
-T_LINK_FAIL   = 60000 ms
-T_LINK_STABLE =  5000 ms
-R_REPROBE     =     5
-
-Scope: copper SFP+ only (SFF8024_CONNECTOR_RJ45 = 0x22)
-
-Note: This patch targets the Linux 6.6 kernel with padavanonly's
-existing SFP patches (999-2753, 999-2754, 999-2764, 999-2765)
-already applied.  The sfp_sm_main() hunk is designed to apply
-AFTER padavanonly's 999-2764 (which changed the phy_probe path
-from "ret == -ENODEV" to "ret == -ENODEV || ret == -EINVAL").
-
-Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
+Signed-off-by: medyma <aneylovemzy@gmail.com>
 ---
- drivers/net/phy/sfp.c | 67 +++++++++++++++++++++++++++++++++++++++++--
- 1 file changed, 72 insertions(+), 2 deletions(-)
+ drivers/net/phy/sfp.c | 78 +++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 76 insertions(+), 2 deletions(-)
 
+diff --git a/drivers/net/phy/sfp.c b/drivers/net/phy/sfp.c
+index 63c4713..a9138d2 100644
 --- a/drivers/net/phy/sfp.c
 +++ b/drivers/net/phy/sfp.c
-@@ -207,6 +207,19 @@ static const enum gpiod_flags gpio_flags
+@@ -207,6 +207,19 @@ static const enum gpiod_flags gpio_flags[] = {
  #define T_PROBE_RETRY_SLOW	msecs_to_jiffies(5000)
  #define R_PROBE_RETRY_SLOW	12
  
@@ -71,50 +37,62 @@ Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
  /* SFP modules appear to always have their PHY configured for bus address
   * 0x56 (which with mdio-i2c, translates to a PHY address of 22).
   * RollBall SFPs access phy via SFP Enhanced Digital Diagnostic Interface
-@@ -289,6 +302,10 @@ struct sfp {
- 	struct sfp_diag diag;
- 	struct delayed_work hwmon_probe;
- 	unsigned int hwmon_tries;
+@@ -262,6 +275,7 @@ struct sfp {
+ 
+ 	struct delayed_work poll;
+ 	struct delayed_work timeout;
 +	struct delayed_work reprobe;
+ 	struct mutex sm_mutex;			/* Protects state machine */
+ 	unsigned char sm_mod_state;
+ 	unsigned char sm_mod_tries_init;
+@@ -270,6 +284,9 @@ struct sfp {
+ 	unsigned short sm_state;
+ 	unsigned char sm_fault_retries;
+ 	unsigned char sm_phy_retries;
 +	unsigned char sm_reprobe_tries;
 +	bool sm_reprobing;
 +	bool sm_reprobe_enabled;
- 	struct device *hwmon_dev;
- 	char *hwmon_name;
- #endif
-@@ -1893,7 +1910,7 @@ static int sfp_sm_probe_phy(struct sfp *
+ 
+ 	struct sfp_eeprom_id id;
+ 	unsigned int module_power_mW;
+@@ -1872,7 +1889,8 @@ static int sfp_sm_probe_phy(struct sfp *sfp, int addr, bool is_c45)
  static void sfp_sm_link_up(struct sfp *sfp)
  {
  	sfp_link_up(sfp->sfp_bus);
 -	sfp_sm_next(sfp, SFP_S_LINK_UP, 0);
-+	sfp_sm_next(sfp, SFP_S_LINK_UP, T_LINK_STABLE);
++	sfp_sm_next(sfp, SFP_S_LINK_UP,
++		    sfp->sm_reprobe_enabled ? T_LINK_STABLE : 0);
  }
  
  static void sfp_sm_link_down(struct sfp *sfp)
-@@ -2477,6 +2494,13 @@ static int sfp_sm_mod_probe(struct sfp *
+@@ -2432,6 +2450,7 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
+ 
+ 	sfp->tx_fault_ignore = false;
+ 	sfp->no_rollball_bridge = false;
++	sfp->sm_reprobe_enabled = false;
+ 
+ 	if (sfp->id.base.extended_cc == SFF8024_ECC_10GBASE_T_SFI ||
+ 	    sfp->id.base.extended_cc == SFF8024_ECC_10GBASE_T_SR ||
+@@ -2454,6 +2473,7 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
  
  	if (sfp->quirk && sfp->quirk->fixup)
  		sfp->quirk->fixup(sfp);
-+	/* Enable reprobe watchdog only for copper SFP+ modules (e.g.
-+	 * RTL8261BE-based) that may change advertised speeds after
-+	 * link partner negotiation. GPON/fiber are unaffected.
-+	 */
-+	sfp->sm_reprobe_enabled =
-+		sfp->id.base.connector == SFF8024_CONNECTOR_RJ45;
 +
  	mutex_unlock(&sfp->st_mutex);
  
  	return 0;
-@@ -2531,6 +2555,8 @@ static void sfp_sm_module(struct sfp *sf
+@@ -2508,6 +2528,10 @@ static void sfp_sm_module(struct sfp *sfp, unsigned int event)
  
  	/* Handle remove event globally, it resets this state machine */
  	if (event == SFP_E_REMOVE) {
-+		if (!sfp->sm_reprobing)
++		if (!sfp->sm_reprobing) {
++			sfp->sm_reprobe_enabled = false;
 +			cancel_delayed_work(&sfp->reprobe);
++		}
  		sfp_sm_mod_remove(sfp);
  		sfp_sm_mod_next(sfp, SFP_MOD_EMPTY, 0);
  		return;
-@@ -2552,6 +2578,9 @@ static void sfp_sm_module(struct sfp *sf
+@@ -2529,6 +2553,9 @@ static void sfp_sm_module(struct sfp *sfp, unsigned int event)
  			sfp_sm_mod_next(sfp, SFP_MOD_PROBE, T_SERIAL);
  			sfp->sm_mod_tries_init = R_PROBE_RETRY_INIT;
  			sfp->sm_mod_tries = R_PROBE_RETRY_SLOW;
@@ -124,7 +102,15 @@ Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
  		}
  		break;
  
-@@ -2765,6 +2794,14 @@ static void sfp_sm_main(struct sfp *sfp,
+@@ -2710,6 +2737,7 @@ static void sfp_sm_main(struct sfp *sfp, unsigned int event)
+ 				sfp_sm_next(sfp, SFP_S_FAIL, 0);
+ 				break;
+ 			}
++			sfp->sm_reprobe_enabled = sfp->no_rollball_bridge;
+ 			sfp->sm_phy_retries = R_PHY_RETRY;
+ 			goto phy_probe;
+ 		}
+@@ -2742,6 +2770,14 @@ static void sfp_sm_main(struct sfp *sfp, unsigned int event)
  			sfp_sm_next(sfp, SFP_S_FAIL, 0);
  			break;
  		}
@@ -139,7 +125,7 @@ Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
  		sfp_sm_link_check_los(sfp);
  
  		/* Reset the fault retry count */
-@@ -2786,7 +2823,12 @@ static void sfp_sm_main(struct sfp *sfp,
+@@ -2763,7 +2799,12 @@ static void sfp_sm_main(struct sfp *sfp, unsigned int event)
  		break;
  
  	case SFP_S_LINK_UP:
@@ -153,7 +139,7 @@ Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
  			sfp_sm_link_down(sfp);
  			sfp_sm_fault(sfp, SFP_S_TX_FAULT, true);
  		} else if (sfp_los_event_active(sfp, event)) {
-@@ -3036,6 +3078,28 @@ static void sfp_poll(struct work_struct
+@@ -3013,6 +3054,36 @@ static void sfp_poll(struct work_struct *work)
  		mod_delayed_work(system_wq, &sfp->poll, poll_jiffies);
  }
  
@@ -161,28 +147,36 @@ Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
 +{
 +	struct sfp *sfp = container_of(work, struct sfp, reprobe.work);
 +
-+	if (!sfp->sm_reprobe_tries)
-+		return;
++	rtnl_lock();
++	mutex_lock(&sfp->sm_mutex);
 +
-+	sfp->sm_reprobe_tries--;
++	if (!sfp->sm_reprobe_enabled || !sfp->sm_reprobe_tries ||
++	    !(sfp->state & SFP_F_PRESENT) ||
++	    sfp->sm_state == SFP_S_LINK_UP)
++		goto unlock;
++
++	--sfp->sm_reprobe_tries;
 +	dev_info(sfp->dev,
 +		 "link not established, re-reading module (%u tries left)\n",
 +		 sfp->sm_reprobe_tries);
 +
 +	/* Replicate a physical remove/insert so the module is re-read and the
-+	 * upstream interface is re-selected from its current advertisement.
-+	 * Runs in process context without sm_mutex held, so taking it via
-+	 * sfp_sm_event() is safe.
++	 * upstream interface is re-selected from its current advertisement,
++	 * without allowing a real state-machine event between the two.
 +	 */
 +	sfp->sm_reprobing = true;
-+	sfp_sm_event(sfp, SFP_E_REMOVE);
-+	sfp_sm_event(sfp, SFP_E_INSERT);
++	__sfp_sm_event(sfp, SFP_E_REMOVE);
++	__sfp_sm_event(sfp, SFP_E_INSERT);
++
++unlock:
++	mutex_unlock(&sfp->sm_mutex);
++	rtnl_unlock();
 +}
 +
  static struct sfp *sfp_alloc(struct device *dev)
  {
  	struct sfp *sfp;
-@@ -3051,6 +3115,7 @@ static struct sfp *sfp_alloc(struct devi
+@@ -3028,6 +3099,7 @@ static struct sfp *sfp_alloc(struct device *dev)
  	mutex_init(&sfp->st_mutex);
  	INIT_DELAYED_WORK(&sfp->poll, sfp_poll);
  	INIT_DELAYED_WORK(&sfp->timeout, sfp_timeout);
@@ -190,19 +184,19 @@ Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
  
  	sfp_hwmon_init(sfp);
  
-@@ -3065,6 +3130,7 @@ static void sfp_cleanup(void *data)
+@@ -3042,6 +3114,7 @@ static void sfp_cleanup(void *data)
  
  	cancel_delayed_work_sync(&sfp->poll);
- 	cancel_delayed_work_sync(&sfp->timeout);
 +	cancel_delayed_work_sync(&sfp->reprobe);
+ 	cancel_delayed_work_sync(&sfp->timeout);
  	if (sfp->i2c_mii) {
  		mdiobus_unregister(sfp->i2c_mii);
  		mdiobus_free(sfp->i2c_mii);
-@@ -3252,6 +3318,7 @@ static void sfp_shutdown(struct platform
+@@ -3229,6 +3302,7 @@ static void sfp_shutdown(struct platform_device *pdev)
  
  	cancel_delayed_work_sync(&sfp->poll);
- 	cancel_delayed_work_sync(&sfp->timeout);
 +	cancel_delayed_work_sync(&sfp->reprobe);
+ 	cancel_delayed_work_sync(&sfp->timeout);
  }
  
  static struct platform_driver sfp_driver = {

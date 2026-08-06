@@ -1,30 +1,19 @@
-From: Petr Wozniak <petr.wozniak@gmail.com>
+From: medyma <aneylovemzy@gmail.com>
 Date: Thu, 15 May 2026 10:00:00 +0200
 Subject: [PATCH 6.6] net: phy: sfp: add XGS-PON module quirks
 
-Add quirk entries for Zaram ZXOS11NPI and HSGQ NU-STICK1.0 XGS-PON
-SFP+ modules, plus two OEM variants (XGSPONST2001/XGSPONST2000).
+Add quirks for Zaram ZXOS11NPI and HSGQ NU-STICK1.0 XGS-PON SFP+
+modules (plus OEM XGSPONST200x variants): ignore TX_FAULT, and
+TX_FAULT + LOS where the pins are repurposed for serial communication.
 
-Zaram ZXOS11NPI: ignore TX_FAULT (erroneously asserted on this module)
-HSGQ NU-STICK1.0 / OEM XGSPONST200x: ignore TX_FAULT + LOS
-  (these pins are repurposed for serial communication)
-
-Note: This patch targets the Linux 6.6 kernel with padavanonly's
-existing SFP quirk patches (999-2753) already applied.  The quirk
-table is inserted after the existing padavanonly rollball entries
-and before the HALNy HL-GSFP entry.
-
-Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
+Signed-off-by: medyma <aneylovemzy@gmail.com>
 ---
  drivers/net/phy/sfp.c | 8 ++++++++
  1 file changed, 8 insertions(+)
 
 --- a/drivers/net/phy/sfp.c
 +++ b/drivers/net/phy/sfp.c
-@@ -504,6 +504,14 @@ static const struct sfp_quirk sfp_quirks
- 	SFP_QUIRK("FS", "GPON-ONU-34-20BI", sfp_quirk_2500basex,
- 		  sfp_fixup_ignore_tx_fault),
- 
+@@ -524,3 +524,11 @@
 +	/* Zaram ZXOS11NPI XGS-PON module (SFP+) */
 +	SFP_QUIRK_F("Zaram", "ZXOS11NPI", sfp_fixup_ignore_tx_fault),
 +	/* HSGQ NU-STICK1.0 XGS-PON module (SFP+) */
@@ -35,4 +24,4 @@ Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
 +
  	SFP_QUIRK_F("HALNy", "HL-GSFP", sfp_fixup_halny_gsfp),
  
- 	// HG MXPD-483II-F 2.5G supports 2500Base-X, but incorrectly reports
+ 	SFP_QUIRK_F("H-COM", "SPP425H-GAB4", sfp_fixup_potron),

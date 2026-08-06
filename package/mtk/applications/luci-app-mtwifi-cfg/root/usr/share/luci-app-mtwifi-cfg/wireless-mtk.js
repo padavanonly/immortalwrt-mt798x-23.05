@@ -13,6 +13,12 @@
 
 var isReadonlyView = !L.hasViewPermission();
 
+var callWifiStationHints = rpc.declare({
+	object: 'luci',
+	method: 'getWifiStationHints',
+	expect: { '': {} }
+});
+
 function count_changes(section_id) {
 	var changes = ui.changes.changes, n = 0;
 
@@ -94,6 +100,7 @@ function render_signal_badge(signalPercent, signalValue, noiseValue, wrap, mode)
 
 	return E('div', {
 		'class': wrap ? 'center' : 'ifacebadge',
+		'title': title,
 		'data-signal': signalValue,
 		'data-noise': noiseValue
 	}, [
@@ -117,6 +124,16 @@ function render_network_badge(radioNet) {
 			radioNet.isUp() ? radioNet.getSignalPercent() : -1,
 			radioNet.getSignal(), radioNet.getNoise(), false, radioNet.getMode());
 }
+function fixMtkEht320Bitrate(radioNet, bitrate) {
+	var radio = radioNet ? radioNet.getWifiDeviceName() : null;
+
+	if (radio && uci.get('wireless', radio, 'type') == 'mtwifi' &&
+	    uci.get('wireless', radio, 'htmode') == 'EHT320' &&
+	    bitrate >= 500 && bitrate <= 530)
+		return 8647;
+
+	return bitrate;
+}
 
 function render_radio_status(radioDev, wifiNets) {
 	var name = radioDev.getI18n().replace(/ Wireless Controller .+$/, ''),
@@ -126,7 +143,7 @@ function render_radio_status(radioDev, wifiNets) {
 	for (var i = 0; i < wifiNets.length; i++) {
 		channel   = channel   || wifiNets[i].getChannel();
 		frequency = frequency || wifiNets[i].getFrequency();
-		bitrate   = bitrate   || wifiNets[i].getBitRate();
+		bitrate   = bitrate   || fixMtkEht320Bitrate(wifiNets[i], wifiNets[i].getBitRate());
 	}
 
 	if (radioDev.isUp())
@@ -199,7 +216,7 @@ function render_modal_status(node, radioNet) {
 		_('Tx-Power'),   is_assoc ? '%d %s'.format(radioNet.getTXPower(), _('dBm')) : null,
 		_('Signal'),     (is_assoc && (hwtype != 'mtwifi')) ? '%d %s'.format(radioNet.getSignal(), _('dBm')) : null,
 		_('Noise'),      (is_assoc && noise != null) ? '%d %s'.format(noise, _('dBm')) : null,
-		_('Bitrate'),    is_assoc ? '%.1f %s'.format(radioNet.getBitRate() || 0, _('Mbit/s')) : null,
+		_('Bitrate'),    is_assoc ? '%.1f %s'.format(fixMtkEht320Bitrate(radioNet, radioNet.getBitRate()) || 0, _('Mbit/s')) : null,
 		_('Country'),    is_assoc ? radioNet.getCountryCode() : null
 	], [ ' | ', E('br'), E('br'), E('br'), E('br'), E('br'), ' | ', E('br'), ' | ' ]);
 
@@ -209,13 +226,29 @@ function render_modal_status(node, radioNet) {
 	return node;
 }
 
+function getWifiRateMHz(rate) {
+	if (!rate || rate.mhz == null)
+		return null;
+
+	if (rate.mhz_hi && rate.mhz < 256)
+		return ((rate.mhz_hi << 8) + rate.mhz);
+
+	return rate.mhz;
+}
 function format_wifirate(rate) {
-	let s = `${rate.rate / 1000}\xa0${_('Mbit/s')}, ${rate.mhz}\xa0${_('MHz')}`;
+	if (!rate || rate.rate == null || rate.rate <= 0)
+		return '-';
+
+	let s = `${rate.rate / 1000}\xa0${_('Mbit/s')}`;
+	const rateMhz = getWifiRateMHz(rate);
+
+	if (rateMhz != null)
+		s += `, ${rateMhz}\xa0${_('MHz')}`;
 
 	if (rate?.ht || rate?.vht) s += [
-		rate?.vht && `, VHT-MCS\xa0${rate?.mcs}`,
-		rate?.nss && `, VHT-NSS\xa0${rate?.nss}`,
-		rate?.ht  && `, MCS\xa0${rate?.mcs}`,
+		rate?.vht && rate?.mcs != null && `, VHT-MCS\xa0${rate?.mcs}`,
+		rate?.nss != null && `, VHT-NSS\xa0${rate?.nss}`,
+		rate?.ht && rate?.mcs != null && `, MCS\xa0${rate?.mcs}`,
 		rate?.short_gi && ', ' + _('Short GI').replace(/ /g, '\xa0')
 	].filter(Boolean).join('');
 
@@ -227,13 +260,50 @@ function format_wifirate(rate) {
 	].filter(Boolean).join('');
 
 	if (rate?.eht) s += [
-		`, EHT-MCS\xa0${rate?.mcs}`,
-		rate?.nss    && `, EHT-NSS\xa0${rate?.nss}`,
-		rate?.eht_gi  && `, EHT-GI\xa0${rate?.eht_gi}`,
-		rate?.eht_dcm && `, EHT-DCM\xa0${rate?.eht_dcm}`
+		rate?.mcs != null && `, EHT-MCS\xa0${rate?.mcs}`,
+		rate?.nss != null && `, EHT-NSS\xa0${rate?.nss}`,
+		rate?.eht_gi != null && `, EHT-GI\xa0${rate?.eht_gi}`,
+		rate?.eht_dcm != null && `, EHT-DCM\xa0${rate?.eht_dcm}`
 	].filter(Boolean).join('');
 
 	return s;
+}
+
+function normalizeStationHint(value) {
+	return (value == '?') ? null : value;
+}
+
+function getStationHint(hosts, stationhints, mac) {
+	var alias = stationhints[(mac || '').toUpperCase()] || stationhints[mac] || null,
+	    source_mac = alias ? alias.source_mac : null,
+	    name = normalizeStationHint(hosts.getHostnameByMACAddr(mac)),
+	    ipv4 = normalizeStationHint(hosts.getIPAddrByMACAddr(mac)),
+	    ipv6 = normalizeStationHint(hosts.getIP6AddrByMACAddr(mac));
+
+	if (!name && alias) {
+		name = normalizeStationHint(alias.name);
+		if (!name && source_mac)
+			name = normalizeStationHint(hosts.getHostnameByMACAddr(source_mac));
+	}
+
+	if (!ipv4 && alias) {
+		ipv4 = normalizeStationHint(L.toArray(alias.ipaddrs || alias.ipv4)[0]);
+		if (!ipv4 && source_mac)
+			ipv4 = normalizeStationHint(hosts.getIPAddrByMACAddr(source_mac));
+	}
+
+	if (!ipv6 && alias) {
+		ipv6 = normalizeStationHint(L.toArray(alias.ip6addrs || alias.ipv6)[0]);
+		if (!ipv6 && source_mac)
+			ipv6 = normalizeStationHint(hosts.getIP6AddrByMACAddr(source_mac));
+	}
+
+	return {
+		name: name,
+		ipv4: ipv4,
+		ipv6: ipv6,
+		source_mac: source_mac
+	};
 }
 
 function radio_restart(id, ev) {
@@ -328,6 +398,67 @@ function add_dep_he_feature(o) {
 	o.depends({'_freq': 'HE160', '!contains': true});
 }
 
+function getMtkFallbackWifiHwModes(band) {
+	var modes = {};
+
+	switch (band) {
+	case '2g':
+		modes.b = true;
+		modes.g = true;
+		modes.n = true;
+		modes.ax = true;
+		modes.be = true;
+		break;
+
+	case '5g':
+		modes.a = true;
+		modes.n = true;
+		modes.ac = true;
+		modes.ax = true;
+		modes.be = true;
+		break;
+
+	case '6g':
+		modes.ax = true;
+		modes.be = true;
+		break;
+	}
+
+	return modes;
+}
+
+function getMtkFallbackWifiHtModes(band) {
+	var modes = {};
+	var add = function() {
+		for (var i = 0; i < arguments.length; i++)
+			modes[arguments[i]] = true;
+	};
+
+	switch (band) {
+	case '2g':
+		add('HT20', 'HT40', 'HE20', 'HE40', 'EHT20', 'EHT40');
+		break;
+
+	case '5g':
+		add(
+			'HT20', 'HT40',
+			'VHT20', 'VHT40', 'VHT80', 'VHT80_80', 'VHT160',
+			'HE20', 'HE40', 'HE80', 'HE80_80', 'HE160',
+			'EHT20', 'EHT40', 'EHT80', 'EHT80_80', 'EHT160'
+		);
+		break;
+
+	case '6g':
+		add(
+			'HE20', 'HE40', 'HE80', 'HE80_80', 'HE160',
+			'EHT20', 'EHT40', 'EHT80', 'EHT80_80', 'EHT160', 'EHT320'
+		);
+		break;
+	}
+
+	return modes;
+}
+
 function add_dep_be_feature(o) {
 	o.depends({'_freq': 'EHT20', '!contains': true});
 	o.depends({'_freq': 'EHT40', '!contains': true});
@@ -380,6 +511,24 @@ var CBIWifiFrequencyValue = form.Value.extend({
 			var hwmodelist = L.toArray(data[0] ? data[0].getHWModes() : null)
 				.reduce(function(o, v) { o[v] = true; return o }, {});
 
+			var htmodelist = L.toArray(data[0] ? data[0].getHTModes() : null)
+				.reduce(function(o, v) { o[v] = true; return o }, {});
+
+			var deviceBand = uci.get('wireless', section_id, 'band') ||
+				(this.channels['6g'].length > 3 ? '6g' :
+					this.channels['5g'].length > 3 ? '5g' :
+					this.channels['2g'].length > 3 ? '2g' :
+					this.channels['60g'].length > 0 ? '60g' : null) ||
+				/* EHT320 is exclusive to 6 GHz; derive band from htmode when
+				 * UCI band option is absent and the channel list is empty
+				 * (radio disabled / iwinfo not probed yet). */
+				(uci.get('wireless', section_id, 'htmode') === 'EHT320' ? '6g' : null);
+
+			if (uci.get('wireless', section_id, 'type') == 'mtwifi' && deviceBand) {
+				Object.assign(hwmodelist, getMtkFallbackWifiHwModes(deviceBand));
+				Object.assign(htmodelist, getMtkFallbackWifiHtModes(deviceBand));
+			}
+
 			this.modes = [
 				'', 'Legacy', hwmodelist.a || hwmodelist.b || hwmodelist.g,
 				'n', 'N', hwmodelist.n,
@@ -387,9 +536,6 @@ var CBIWifiFrequencyValue = form.Value.extend({
 				'ax', 'AX', hwmodelist.ax,
 				'be', 'BE', hwmodelist.be
 			];
-
-			var htmodelist = L.toArray(data[0] ? data[0].getHTModes() : null)
-				.reduce(function(o, v) { o[v] = true; return o }, {});
 
 			this.htmodes = {
 				'': [ '', '-', true ],
@@ -400,12 +546,14 @@ var CBIWifiFrequencyValue = form.Value.extend({
 				'ac': [
 					'VHT160', '160 MHz', htmodelist.VHT160,
 					'VHT80', '80 MHz', htmodelist.VHT80,
+					'VHT80_80', '80+80 MHz', htmodelist.VHT80_80,
 					'VHT40', '40 MHz', htmodelist.VHT40,
 					'VHT20', '20 MHz', htmodelist.VHT20
 				],
 				'ax': [
 					'HE160', '160 MHz', htmodelist.HE160,
 					'HE80', '80 MHz', htmodelist.HE80,
+					'HE80_80', '80+80 MHz', htmodelist.HE80_80,
 					'HE40', '40 MHz', htmodelist.HE40,
 					'HE20', '20 MHz', htmodelist.HE20
 				],
@@ -413,6 +561,7 @@ var CBIWifiFrequencyValue = form.Value.extend({
 					'EHT320', '320 MHz', htmodelist.EHT320,
 					'EHT160', '160 MHz', htmodelist.EHT160,
 					'EHT80', '80 MHz',  htmodelist.EHT80, 
+					'EHT80_80', '80+80 MHz', htmodelist.EHT80_80,
 					'EHT40', '40 MHz',  htmodelist.EHT40, 
 					'EHT20', '20 MHz',  htmodelist.EHT20 
 				]
@@ -504,11 +653,11 @@ var CBIWifiFrequencyValue = form.Value.extend({
 
 		this.setValues(mode, this.modes);
 
-		if (/EHT20|EHT40|EHT80|EHT160|EHT320/.test(htval))
+		if (/EHT20|EHT40|EHT80|EHT80_80|EHT160|EHT320/.test(htval))
 			mode.value = 'be';
-		else if (/HE20|HE40|HE80|HE160/.test(htval))
+		else if (/HE20|HE40|HE80|HE80_80|HE160/.test(htval))
 			mode.value = 'ax';
-		else if (/VHT20|VHT40|VHT80|VHT160/.test(htval))
+		else if (/VHT20|VHT40|VHT80|VHT80_80|VHT160/.test(htval))
 			mode.value = 'ac';
 		else if (/HT20|HT40/.test(htval))
 			mode.value = 'n';
@@ -685,8 +834,8 @@ return view.extend({
 
 		for (var i = 0; i < rows.length; i++) {
 			var section_id = rows[i].getAttribute('data-sid'),
-			    radioDev = data[1].filter(function(d) { return d.getName() == section_id })[0],
-			    radioNet = data[2].filter(function(n) { return n.getName() == section_id })[0],
+			    radioDev = data[2].filter(function(d) { return d.getName() == section_id })[0],
+			    radioNet = data[3].filter(function(n) { return n.getName() == section_id })[0],
 			    badge = rows[i].querySelector('[data-name="_badge"] > div'),
 			    stat = rows[i].querySelector('[data-name="_stat"]'),
 			    btns = rows[i].querySelectorAll('.cbi-section-actions button'),
@@ -694,7 +843,7 @@ return view.extend({
 
 			if (radioDev) {
 				dom.content(badge, render_radio_badge(radioDev));
-				dom.content(stat, render_radio_status(radioDev, data[2].filter(function(n) { return n.getWifiDeviceName() == radioDev.getName() })));
+				dom.content(stat, render_radio_status(radioDev, data[3].filter(function(n) { return n.getWifiDeviceName() == radioDev.getName() })));
 			}
 			else {
 				dom.content(badge, render_network_badge(radioNet));
@@ -711,23 +860,30 @@ return view.extend({
 
 		var table = document.querySelector('#wifi_assoclist_table'),
 		    hosts = data[0],
+		    stationhints = data[1],
 		    trows = [];
 
-		for (var i = 0; i < data[3].length; i++) {
-			var bss = data[3][i],
-			    name = hosts.getHostnameByMACAddr(bss.mac),
-			    ipv4 = hosts.getIPAddrByMACAddr(bss.mac),
-			    ipv6 = hosts.getIP6AddrByMACAddr(bss.mac);
+		for (var i = 0; i < data[4].length; i++) {
+			var bss = data[4][i],
+			    host = getStationHint(hosts, stationhints, bss.mac),
+			    name = host.name,
+			    ipv4 = host.ipv4,
+			    ipv6 = host.ipv6;
 
 			var hint = '-';
 			if (bss.network.getMode() == 'ap')
 			{
+				/* For Wi-Fi 7 MLO stations the assoclist link MAC may differ
+				 * from the MLD MAC used for DHCP.  The station hint RPC resolves
+				 * that alias; retain the link MAC as the final fallback. */
+				var station_mac = (bss.mac && bss.mac != '?') ? bss.mac : '-';
+
 				if (name && ipv4 && ipv6)
 					hint = '%s <span class="hide-xs">(%s, %s)</span>'.format(name, ipv4, ipv6);
 				else if (name && (ipv4 || ipv6))
 					hint = '%s <span class="hide-xs">(%s)</span>'.format(name, ipv4 || ipv6);
 				else
-					hint = name || ipv4 || ipv6 || '?';
+					hint = name || ipv4 || ipv6 || station_mac;
 			}
 
 			var timestr = '-';
@@ -2475,7 +2631,11 @@ return view.extend({
 		return m.render().then(L.bind(function(m, nodes) {
 			poll.add(L.bind(function() {
 				var section_ids = m.children[0].cfgsections(),
-				    tasks = [ network.getHostHints(), network.getWifiDevices() ];
+				    tasks = [
+					network.getHostHints(),
+					L.resolveDefault(callWifiStationHints(), {}),
+					network.getWifiDevices()
+				    ];
 
 				for (var i = 0; i < section_ids.length; i++) {
 					var row = nodes.querySelector('.cbi-section-table-row[data-sid="%s"]'.format(section_ids[i])),
@@ -2496,39 +2656,39 @@ return view.extend({
 				}
 
 				return Promise.all(tasks)
-					.then(L.bind(function(hosts_radios) {
+					.then(L.bind(function(hosts_stationhints_radios) {
 						var tasks = [];
 
-						for (var i = 0; i < hosts_radios[1].length; i++)
-							tasks.push(hosts_radios[1][i].getWifiNetworks());
+						for (var i = 0; i < hosts_stationhints_radios[2].length; i++)
+							tasks.push(hosts_stationhints_radios[2][i].getWifiNetworks());
 
 						return Promise.all(tasks).then(function(data) {
-							hosts_radios[2] = [];
+							hosts_stationhints_radios[3] = [];
 
 							for (var i = 0; i < data.length; i++)
-								hosts_radios[2].push.apply(hosts_radios[2], data[i]);
+								hosts_stationhints_radios[3].push.apply(hosts_stationhints_radios[3], data[i]);
 
-							return hosts_radios;
+							return hosts_stationhints_radios;
 						});
 					}, network))
-					.then(L.bind(function(hosts_radios_wifis) {
+					.then(L.bind(function(hosts_stationhints_radios_wifis) {
 						var tasks = [];
 
-						for (var i = 0; i < hosts_radios_wifis[2].length; i++)
-							tasks.push(hosts_radios_wifis[2][i].getAssocList());
+						for (var i = 0; i < hosts_stationhints_radios_wifis[3].length; i++)
+							tasks.push(hosts_stationhints_radios_wifis[3][i].getAssocList());
 
 						return Promise.all(tasks).then(function(data) {
-							hosts_radios_wifis[3] = [];
+							hosts_stationhints_radios_wifis[4] = [];
 
 							for (var i = 0; i < data.length; i++) {
-								var wifiNetwork = hosts_radios_wifis[2][i],
-								    radioDev = hosts_radios_wifis[1].filter(function(d) { return d.getName() == wifiNetwork.getWifiDeviceName() })[0];
+								var wifiNetwork = hosts_stationhints_radios_wifis[3][i],
+								    radioDev = hosts_stationhints_radios_wifis[2].filter(function(d) { return d.getName() == wifiNetwork.getWifiDeviceName() })[0];
 
 								for (var j = 0; j < data[i].length; j++)
-									hosts_radios_wifis[3].push(Object.assign({ radio: radioDev, network: wifiNetwork }, data[i][j]));
+									hosts_stationhints_radios_wifis[4].push(Object.assign({ radio: radioDev, network: wifiNetwork }, data[i][j]));
 							}
 
-							return hosts_radios_wifis;
+							return hosts_stationhints_radios_wifis;
 						});
 					}, network))
 					.then(L.bind(this.poll_status, this, nodes));

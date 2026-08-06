@@ -22,6 +22,7 @@ local l1parser = require "l1dat_parser"
 local datconf = require "datconf"
 local utils = require "mtwifi_utils"
 local defs = require "mtwifi_defs"
+local bandwidth = require "mtwifi_bandwidth"
 
 local l1dat = l1parser.load_l1_profile(l1parser.L1_DAT_PATH)
 
@@ -436,31 +437,10 @@ function mtwifi_cfg_setup(argv)
         return
     end
 
-    -- setup bandwidth
-    local bw = string.match(cfg.config.htmode, "%d+")
-    if not bw then
-        nixio.syslog("err", "mtwifi-cfg: invalid bandwidth!")
+    local bandwidth_ok, bandwidth_err = bandwidth.apply(cfg.config, dats)
+    if not bandwidth_ok then
+        nixio.syslog("err", "mtwifi-cfg: " .. bandwidth_err .. "!")
         return
-    end
-
-    -- default bw is 20MHz
-    dats.HT_BW = 0
-    dats.VHT_BW = 0
-
-    if bw == "40" then
-        dats.HT_BW = 1
-        dats.VHT_BW = 0
-        if cfg.config.noscan ~= nil and cfg.config.noscan == "1" then
-            dats.HT_BSSCoexistence = 0
-        else
-            dats.HT_BSSCoexistence = 1
-        end
-    elseif bw == "80" then
-        dats.HT_BW = 1
-        dats.VHT_BW = 1
-    elseif bw == "160" then
-        dats.HT_BW = 1
-        dats.VHT_BW = 2
     end
 
     -- setup apcli

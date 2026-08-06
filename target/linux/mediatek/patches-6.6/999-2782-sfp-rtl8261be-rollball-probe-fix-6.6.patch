@@ -1,86 +1,63 @@
-From: Petr Wozniak <petr.wozniak@gmail.com>
+From: medyma <aneylovemzy@gmail.com>
 Date: Thu, 15 May 2026 12:00:00 +0200
-Subject: [PATCH 6.6] net: sfp: probe-based RTL8261BE rollball detection
+Subject: [PATCH 6.6] net: sfp: probe RollBall bridge for RTL8261BE
 
-RTL8261BE is a pure media converter — it has no I2C-to-MDIO PHY bridge
-and does not support the ROLLBALL protocol.  Previously, the kernel
-unconditionally matched it via sfp_fixup_rollball_cc, causing an 8-minute
-PHY probe retry loop that never succeeds.
+RTL8261BE media converters share EEPROM strings with RollBall modules, so
+probe the 0x51 command interface. NACK or a short unlock write means no
+bridge: return -ENODEV so the SFP driver downgrades the module to a media
+converter instead of failing it. Add the SFP-10G-T-I quirk.
 
-Add i2c_mii_probe_rollball() which sends the ROLLBALL unlock password,
-switches to the MDIO page, issues CMD_READ, and polls CMD_DONE for up
-to 200ms (10×20ms).  A real RollBall bridge asserts CMD_DONE within
-~70ms; RTL8261BE (no bridge) never asserts it, so the probe times out.
-
-Modify sfp_fixup_rollball_cc() to call sfp_has_rollball_bridge() first:
-- Bridge detected   → MDIO_I2C_ROLLBALL + extended_cc fix (normal path)
-- No bridge (RTL8261BE) → MDIO_I2C_NONE (skip PHY probing entirely)
-
-Also fix mdio_i2c_alloc() to treat -ENODEV from rollball init as a
-non-fatal condition (gracefully downgrade to no MDIO bus).
-
-Add SFP-10G-T-I (industrial RTL8261BE variant) to the quirk table.
-
-Tested: iperf3 9.34 Gbits/sec between two BPI-R4 via RTL8261BE + Cat5e.
-
-Note: This patch targets the Linux 6.6 kernel with padavanonly's
-existing SFP quirk patches (999-2753, 999-2754, 999-2764, 999-2765)
-already applied.  The mdio-i2c.c changes have no conflicts with any
-existing padavanonly patches.
-
-The sfp_sm_add_mdio_bus() change from the 25.12 version is omitted
-here — this function was introduced in Linux 6.7+ and does not exist
-in the 6.6 kernel.
-
-Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
+Signed-off-by: medyma <aneylovemzy@gmail.com>
 ---
- drivers/net/mdio/mdio-i2c.c | 48 ++++++++++++++++++++++++++++++++++++--------
- drivers/net/phy/sfp.c       |  1 +
- 2 files changed, 41 insertions(+), 8 deletions(-)
+ drivers/net/mdio/mdio-i2c.c | 53 ++++++++++++++++++++++++++++++++++----
+ drivers/net/phy/sfp.c       | 16 +++++++++++-
+ 2 files changed, 63 insertions(+), 6 deletions(-)
 
+diff --git a/drivers/net/mdio/mdio-i2c.c b/drivers/net/mdio/mdio-i2c.c
+index da2001e..379d956 100644
 --- a/drivers/net/mdio/mdio-i2c.c
 +++ b/drivers/net/mdio/mdio-i2c.c
-@@ -352,6 +352,50 @@ static int i2c_mii_write_rollball(struct
+@@ -352,6 +352,50 @@ static int i2c_mii_write_rollball(struct mii_bus *bus, int phy_id, int devad,
  	return 0;
  }
  
 +static int i2c_mii_probe_rollball(struct i2c_adapter *i2c)
 +{
 +	u8 data_buf[] = { ROLLBALL_DATA_ADDR, 0x01, 0x00, 0x00 };
-+	u8 cmd_buf[]  = { ROLLBALL_CMD_ADDR, ROLLBALL_CMD_READ };
-+	u8 cmd_addr   = ROLLBALL_CMD_ADDR;
++	u8 cmd_buf[] = { ROLLBALL_CMD_ADDR, ROLLBALL_CMD_READ };
++	u8 cmd_addr = ROLLBALL_CMD_ADDR;
 +	struct i2c_msg msgs[2];
 +	u8 result;
 +	int ret;
 +	int i;
 +
-+	msgs[0].addr  = ROLLBALL_PHY_I2C_ADDR;
++	msgs[0].addr = ROLLBALL_PHY_I2C_ADDR;
 +	msgs[0].flags = 0;
-+	msgs[0].len   = sizeof(data_buf);
-+	msgs[0].buf   = data_buf;
-+	msgs[1].addr  = ROLLBALL_PHY_I2C_ADDR;
++	msgs[0].len = sizeof(data_buf);
++	msgs[0].buf = data_buf;
++	msgs[1].addr = ROLLBALL_PHY_I2C_ADDR;
 +	msgs[1].flags = 0;
-+	msgs[1].len   = sizeof(cmd_buf);
-+	msgs[1].buf   = cmd_buf;
++	msgs[1].len = sizeof(cmd_buf);
++	msgs[1].buf = cmd_buf;
 +
 +	ret = i2c_transfer_rollball(i2c, msgs, ARRAY_SIZE(msgs));
-+	if (ret < 0)
-+		return -ENODEV;
++	if (ret)
++		return ret;
 +
-+	msgs[0].addr  = ROLLBALL_PHY_I2C_ADDR;
++	msgs[0].addr = ROLLBALL_PHY_I2C_ADDR;
 +	msgs[0].flags = 0;
-+	msgs[0].len   = 1;
-+	msgs[0].buf   = &cmd_addr;
-+	msgs[1].addr  = ROLLBALL_PHY_I2C_ADDR;
++	msgs[0].len = 1;
++	msgs[0].buf = &cmd_addr;
++	msgs[1].addr = ROLLBALL_PHY_I2C_ADDR;
 +	msgs[1].flags = I2C_M_RD;
-+	msgs[1].len   = 1;
-+	msgs[1].buf   = &result;
++	msgs[1].len = 1;
++	msgs[1].buf = &result;
 +
 +	for (i = 0; i < 10; i++) {
 +		msleep(20);
 +		ret = i2c_transfer_rollball(i2c, msgs, ARRAY_SIZE(msgs));
-+		if (ret < 0)
-+			return -ENODEV;
++		if (ret)
++			return ret;
 +		if (result == ROLLBALL_CMD_DONE)
 +			return 0;
 +	}
@@ -91,23 +68,30 @@ Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
  static int i2c_mii_init_rollball(struct i2c_adapter *i2c)
  {
  	struct i2c_msg msg;
-@@ -371,11 +415,11 @@ static int i2c_mii_init_rollball(struct
- 
+@@ -372,10 +416,16 @@ static int i2c_mii_init_rollball(struct i2c_adapter *i2c)
  	ret = i2c_transfer(i2c, &msg, 1);
- 	if (ret < 0)
+-	if (ret < 0)
 -		return ret;
--	else if (ret != 1)
-+		return -ENODEV;
++	if (ret < 0) {
++		/* A module without the RollBall bridge firmware answers
++		 * the 0x51 command interface with NACK; treat it as a
++		 * confirmed media converter instead of failing. */
++		if (ret == -ENXIO)
++			return -ENODEV;
++		return ret;
++	}
 +	if (ret != 1)
- 		return -EIO;
--	else
--		return 0;
++		return -ENODEV;
 +
 +	return i2c_mii_probe_rollball(i2c);
+-	else if (ret != 1)
+-		return -EIO;
+-	else
+-		return 0;
  }
  
  struct mii_bus *mdio_i2c_alloc(struct device *parent, struct i2c_adapter *i2c,
-@@ -399,9 +443,10 @@ struct mii_bus *mdio_i2c_alloc(struct de
+@@ -399,9 +443,10 @@ struct mii_bus *mdio_i2c_alloc(struct device *parent, struct i2c_adapter *i2c,
  	case MDIO_I2C_ROLLBALL:
  		ret = i2c_mii_init_rollball(i2c);
  		if (ret < 0) {
@@ -121,9 +105,19 @@ Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
  			mdiobus_free(mii);
  			return ERR_PTR(ret);
  		}
+diff --git a/drivers/net/phy/sfp.c b/drivers/net/phy/sfp.c
+index 1fdd4e1..63c4713 100644
 --- a/drivers/net/phy/sfp.c
 +++ b/drivers/net/phy/sfp.c
-@@ -540,6 +540,7 @@ static const struct sfp_quirk sfp_quirks
+@@ -232,6 +232,7 @@ struct sfp {
+ 	struct mii_bus *i2c_mii;
+ 	struct sfp_bus *sfp_bus;
+ 	enum mdio_i2c_proto mdio_protocol;
++	bool no_rollball_bridge;
+ 	struct phy_device *mod_phy;
+ 	const struct sff_data *type;
+ 	size_t i2c_block_size;
+@@ -539,6 +540,7 @@ static const struct sfp_quirk sfp_quirks[] = {
  	// OEM SFP-GE-T is a 1000Base-T module with broken TX_FAULT indicator
  	SFP_QUIRK_F("OEM", "SFP-GE-T", sfp_fixup_ignore_tx_fault),
  
@@ -131,3 +125,31 @@ Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
  	SFP_QUIRK_F("ETU", "ESP-T5-R", sfp_fixup_rollball_cc),
  	SFP_QUIRK_F("OEM", "SFP-10G-T", sfp_fixup_rollball_cc),
  	SFP_QUIRK_M("OEM", "SFP-2.5G-T", sfp_quirk_oem_2_5g),
+@@ -736,8 +738,18 @@ static int sfp_i2c_mdiobus_create(struct sfp *sfp)
+ 	int ret;
+ 
+ 	i2c_mii = mdio_i2c_alloc(sfp->dev, sfp->i2c, sfp->mdio_protocol);
+-	if (IS_ERR(i2c_mii))
++	if (IS_ERR(i2c_mii)) {
++		if (sfp->mdio_protocol == MDIO_I2C_ROLLBALL &&
++		    PTR_ERR(i2c_mii) == -ENODEV) {
++			dev_info(sfp->dev,
++				 "no RollBall bridge detected, using module as a media converter\n");
++			sfp->mdio_protocol = MDIO_I2C_NONE;
++			sfp->no_rollball_bridge = true;
++			return 0;
++		}
++
+ 		return PTR_ERR(i2c_mii);
++	}
+ 
+ 	i2c_mii->name = "SFP I2C Bus";
+ 	i2c_mii->phy_mask = ~0;
+@@ -2419,6 +2431,7 @@ static int sfp_sm_mod_probe(struct sfp *sfp, bool report)
+ 	sfp->phy_t_retry = T_PHY_RETRY;
+ 
+ 	sfp->tx_fault_ignore = false;
++	sfp->no_rollball_bridge = false;
+ 
+ 	if (sfp->id.base.extended_cc == SFF8024_ECC_10GBASE_T_SFI ||
+ 	    sfp->id.base.extended_cc == SFF8024_ECC_10GBASE_T_SR ||
