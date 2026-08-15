@@ -88,7 +88,7 @@ process_existing_leases() {
 	iptables -t mangle -A eqos -s $IP -j DSCP --set-dscp ${MARK_VALUE}
 	iptables -t mangle -A eqos -d $IP -j DSCP --set-dscp ${idpair}
 	ip6tables -t mangle -A eqos -m mac --mac-source $MAC -j MARK --set-mark ${MARK_VALUE}
-	ebtables -t nat -A eqos -A ipv6 -d $MAC -j mark --mark-set ${idpair}
+	ebtables -t nat -A eqos -p ipv6 -d $MAC -j mark --mark-set ${idpair}
     done < "$LEASE_FILE"
 }
 
