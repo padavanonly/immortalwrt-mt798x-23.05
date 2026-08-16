@@ -494,6 +494,18 @@ define U-Boot/mt7981_netis_nx31
   DEPENDS:=+trusted-firmware-a-mt7981-spim-nand-ddr3
 endef
 
+define U-Boot/mt7981_netcore_n30-pro
+  NAME:=Netcore N30 Pro
+  BUILD_SUBTARGET:=filogic
+  BUILD_DEVICES:=netcore_n30-pro
+  UBOOT_CONFIG:=mt7981_netcore_n30-pro
+  UBOOT_IMAGE:=u-boot.fip
+  BL2_BOOTDEV:=spim-nand
+  BL2_SOC:=mt7981
+  BL2_DDRTYPE:=ddr3
+  DEPENDS:=+trusted-firmware-a-mt7981-spim-nand-ddr3
+endef
+
 define U-Boot/mt7981_netis_nx32u
   NAME:=netis NX32U
   BUILD_SUBTARGET:=filogic
@@ -1128,6 +1140,7 @@ UBOOT_TARGETS := \
 	mt7981_konka_komi-a31-emmc \
 	mt7981_konka_komi-a31-nor \
 	mt7981_livinet_zr-3020 \
+	mt7981_netcore_n30-pro \
 	mt7981_netis_nx31 \
 	mt7981_netis_nx32u \
 	mt7981_nokia_ea0326gmp \

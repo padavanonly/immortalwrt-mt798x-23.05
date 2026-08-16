@@ -67,6 +67,7 @@ platform_do_upgrade() {
 
 	case "$board" in
 	netcore,n60-pro|\
+	netcore,n30-pro|\
 	tplink,tl-xdr4288|\
     tplink,tl-xdr6086|\
     tplink,tl-xdr6088|\
