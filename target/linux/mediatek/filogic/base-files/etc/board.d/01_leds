@@ -117,6 +117,11 @@ netcore,n60-pro)
 	ucidef_set_led_netdev "wlan" "WLAN" "blue:wlan" "rax0" "link"
 	ucidef_set_led_usbport "usb" "USB" "blue:usb" "usb2-port1"
 	;;
+netcore,n30-pro)
+	ucidef_set_led_netdev "wanlink" "WANLINK" "green:wan" "eth1" "link"
+	ucidef_set_led_netdev "wanact" "WANACT" "green:wan-online" "eth1" "tx rx"
+	ucidef_set_led_usbport "usb" "USB" "green:usb" "usb1-port1" "usb2-port1"
+	;;
 netgear,wax220)
 	ucidef_set_led_netdev "eth0" "LAN" "green:lan" "eth0"
 	;;

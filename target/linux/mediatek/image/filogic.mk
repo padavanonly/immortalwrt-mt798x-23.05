@@ -1695,6 +1695,21 @@ define Device/netcore_n60-pro
 endef
 TARGET_DEVICES += netcore_n60-pro
 
+define Device/netcore_n30-pro
+  DEVICE_VENDOR := Netcore
+  DEVICE_MODEL := N30 Pro
+  DEVICE_DTS := mt7981b-netcore-n30-pro
+  DEVICE_DTS_DIR := ../dts
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  UBOOTENV_IN_UBI := 1
+  IMAGE_SIZE := 117248k
+  KERNEL_INITRAMFS_SUFFIX := -recovery.itb
+  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware kmod-usb3 kmod-usb-ledtrig-usbport automount
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+endef
+TARGET_DEVICES += netcore_n30-pro
+
 define Device/netgear_wax220
   DEVICE_VENDOR := NETGEAR
   DEVICE_MODEL := WAX220
